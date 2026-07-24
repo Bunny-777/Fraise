@@ -9,7 +9,8 @@ A voice-first AI assistant you talk to out loud. Say what you need — a calenda
 - Real-time voice over a single WebSocket (Deepgram Voice Agent: STT + LLM + TTS in one stream).
 - Skills are MCP servers — calculator, calendar, memory, weather, web research, on-device document Q&A.
 - Dictate your whole day and it gets split into tasks, fanned out to parallel agents, and handled.
-- Dictation mode — speak long messages or essays instead of typing. Transcribed fully on-device (faster-whisper + Silero VAD); nothing leaves your machine. Set `STT_MODEL` (default `large-v3-turbo`) to trade accuracy for speed.
+- Dictation mode — speak long messages or essays instead of typing. Two models run at once, fully on-device: a tiny model streams provisional captions ~5x/sec as you talk (words appear while you're still speaking, not after), while a small, fast model (`base` by default) confirms each utterance the moment you pause — Whisper's encoder cost is fixed per utterance regardless of length, so bigger models like `large-v3-turbo` mean multi-second lag no matter how tightly VAD is tuned; `base` keeps confirmation under ~1s. Nothing leaves your machine. Voice commands ("comma", "new paragraph", "question mark", …) become real punctuation instantly, no LLM round trip. On "Finish", an LLM pass polishes capitalization/paragraphing and detects if you were dictating an email — pulling out a subject and body, and a recipient address only if you actually said one out loud. Every dictation is saved and reachable anytime from the sidebar. Set `STT_MODEL` (default `base`) for more accuracy at the cost of latency, and `STT_LIVE_MODEL` (default `tiny`) for the live captions.
+- Dictate an email and send it — Fraise drafts the subject/body from what you said, you confirm the recipient, and it sends over SMTP (see Getting started).
 - Multi-agent research: ask a question, a team of agents searches different sources in parallel and writes up a doc or deck.
 - On-device document Q&A — upload a PDF/txt/md and ask about it; nothing leaves your machine.
 - Persistent memory across a session, and spoken confirmation before anything destructive.
@@ -32,6 +33,11 @@ Prerequisites: Python 3.11+, Node 18+, a Deepgram API key.
 
 ```bash
 # .env at the repo root: DEEPGRAM_API_KEY, GROQ_API_KEY, TAVILY_API_KEY
+#
+# Optional, to send emails dictated in Dictation mode — a Gmail app password
+# works (myaccount.google.com/apppasswords), or any SMTP provider:
+#   SMTP_USER, SMTP_PASSWORD, and optionally SMTP_HOST/SMTP_PORT/SMTP_FROM.
+# Without these, dictated emails still draft — sending returns a clear error.
 
 cd backend
 python -m venv .venv && source .venv/bin/activate
@@ -71,9 +77,15 @@ Write an MCP server (see `backend/app/servers/calculator.py`), add one entry to 
 | --- | --- | --- |
 | `GET` | `/health` | Liveness check. |
 | `WS` | `/ws?sid=<id>` | Voice session. |
-| `WS` | `/ws/dictation?sid=<id>` | Dictation mode — stream PCM16 in, transcript segments out (local STT). |
+| `WS` | `/ws/dictation?sid=<id>` | Dictation mode — stream PCM16 in, punctuated transcript segments out, then a polished + email-detected final. |
+| `GET` | `/dictations?sid=<id>` | List saved dictations. |
+| `GET` | `/dictations/{id}?sid=<id>` | Fetch one dictation — raw text, polished text, email fields. |
+| `POST` | `/dictations/{id}/polish?sid=<id>` | Re-run the LLM cleanup/email-detection pass. |
+| `POST` | `/dictations/{id}/send?sid=<id>` | Send a dictated email over SMTP. |
 | `POST` | `/upload?sid=<id>` | Add a document. |
 | `POST` | `/dictate?sid=<id>` | Segment a day's dictation into tasks. |
+| `GET` | `/days?sid=<id>` | List past day runs. |
+| `GET` | `/days/{id}?sid=<id>` | Reopen a past day run — full task results. |
 | `GET` | `/agents/stream?sid=<id>` | SSE progress for research/dictate runs. |
 | `GET` | `/auth/calendar` | Google Calendar OAuth. |
 
