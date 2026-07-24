@@ -19,6 +19,7 @@ import DayView from "./DayView";
 import { AgentPanel, ArtifactView } from "./Agents";
 import { useAgents } from "./useAgents";
 import { useDay, useDayHistory } from "./useDay";
+import { useDictationHistory } from "./useDictations";
 import { useHistory } from "./useHistory";
 import { FraiseMark, GitHubMark, SunIcon, MoonIcon } from "./icons";
 import "./App.css";
@@ -140,6 +141,8 @@ export default function App() {
   const dayHistory = useDayHistory(activeId, `${day?.dayId ?? ""}:${day?.status ?? ""}`);
   const [enteredApp, setEnteredApp] = useState(false);
   const [dictating, setDictating] = useState(false);
+  const [openDictId, setOpenDictId] = useState<string | null>(null);
+  const dictationHistory = useDictationHistory(activeId, `${dictating}`);
 
   const { turns, memories } = useHistory(activeId, messages.length);
 
@@ -221,17 +224,29 @@ export default function App() {
 
   const openDictation = useCallback(() => {
     if (listening) toggle();
+    setOpenDictId(null);
     setDictating(true);
   }, [listening, toggle]);
 
+  const closeDictation = useCallback(() => {
+    setDictating(false);
+    setOpenDictId(null);
+  }, []);
+
   const dictationToTasks = useCallback(
     (text: string) => {
-      setDictating(false);
+      closeDictation();
       dismissRun();
       void processDay(text);
     },
-    [processDay, dismissRun],
+    [processDay, dismissRun, closeDictation],
   );
+
+  const openPastDictation = useCallback((id: string) => {
+    setOpenDictId(id);
+    setDictating(true);
+    setMenuOpen(false);
+  }, []);
 
   const openPastDay = useCallback(
     (id: string) => {
@@ -331,7 +346,12 @@ export default function App() {
           onToggleTheme={toggleTheme}
         />
         {dictating && (
-          <Dictation sid={activeId} onClose={() => setDictating(false)} onPlanDay={dictationToTasks} />
+          <Dictation
+            sid={activeId}
+            openId={openDictId ?? undefined}
+            onClose={closeDictation}
+            onPlanDay={dictationToTasks}
+          />
         )}
         <SpeedInsights />
       </>
@@ -393,6 +413,31 @@ export default function App() {
                     <span className="recent-meta">
                       {d.task_count} task{d.task_count === 1 ? "" : "s"}
                       {d.status !== "done" && ` · ${d.status}`} · {timeAgo(d.created_at)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {dictationHistory.length > 0 && (
+            <>
+              <div className="section-label">Dictations</div>
+              <div className="recents">
+                {dictationHistory.map((d) => (
+                  <button
+                    key={d.id}
+                    className={`recent${openDictId === d.id ? " active" : ""}`}
+                    onClick={() => openPastDictation(d.id)}
+                    title={d.snippet}
+                  >
+                    <span className="recent-title">
+                      <span className="dot" />
+                      <span>{d.snippet || "Dictation"}</span>
+                    </span>
+                    <span className="recent-meta">
+                      {d.is_email ? "Email" : "Note"}
+                      {d.status === "sent" && " · Sent"} · {timeAgo(d.created_at)}
                     </span>
                   </button>
                 ))}
@@ -563,6 +608,18 @@ export default function App() {
             </div>
 
             <div className="header-right">
+              <button
+                className="icon-btn"
+                onClick={openDictation}
+                disabled={!speechSupported}
+                aria-label="Dictate"
+                title="Dictate — speak a long message or essay, transcribed locally"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="9" y="3" width="6" height="11" rx="3" />
+                  <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+                </svg>
+              </button>
               <a
                 className="icon-btn"
                 href="https://github.com/Dhruv-kys/Fraise"
@@ -741,7 +798,8 @@ export default function App() {
       {dictating && (
         <Dictation
           sid={activeId}
-          onClose={() => setDictating(false)}
+          openId={openDictId ?? undefined}
+          onClose={closeDictation}
           onPlanDay={dictationToTasks}
         />
       )}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDictation, type DictationStatus } from "./useDictation";
+import { httpBase } from "./useVoiceAgent";
 
 const STATUS_LABEL: Record<DictationStatus, string> = {
   idle: "Ready",
@@ -8,9 +9,12 @@ const STATUS_LABEL: Record<DictationStatus, string> = {
   listening: "Listening",
   paused: "Paused",
   finishing: "Transcribing…",
+  polishing: "Polishing…",
   done: "Done",
   error: "Error",
 };
+
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 function fmtTime(s: number): string {
   const m = Math.floor(s / 60);
@@ -19,28 +23,39 @@ function fmtTime(s: number): string {
 
 export default function Dictation({
   sid,
+  openId,
   onClose,
   onPlanDay,
 }: {
   sid: string;
+  openId?: string;
   onClose: () => void;
   onPlanDay: (text: string) => void;
 }) {
-  const { status, segments, note, error, elapsed, levelRef, start, pause, resume, stop, cancel } =
-    useDictation(sid);
+  const {
+    status, segments, interim, id, polished, isEmail, email, setEmail, note, error, elapsed, levelRef,
+    start, pause, resume, stop, open, cancel,
+  } = useDictation(sid);
   const [draft, setDraft] = useState("");
+  const [view, setView] = useState<"polished" | "raw">("polished");
   const [copied, setCopied] = useState(false);
+  const [sendState, setSendState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [sendError, setSendError] = useState("");
   const feedRef = useRef<HTMLDivElement>(null);
   const dotRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
+    if (openId) {
+      void open(openId);
+      return;
+    }
     const t = window.setTimeout(() => void start(), 60);
     return () => window.clearTimeout(t);
-  }, [start]);
+  }, [openId, open, start]);
 
   useEffect(() => {
-    if (status === "done") setDraft(segments.join(" "));
-  }, [status, segments]);
+    if (status === "done") setDraft(view === "polished" && polished ? polished : segments.join(" "));
+  }, [status, segments, polished, view]);
 
   useEffect(() => {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
@@ -71,7 +86,7 @@ export default function Dictation({
   }, [close]);
 
   const recording = status === "listening" || status === "paused";
-  const busy = status === "connecting" || status === "loading" || status === "finishing";
+  const busy = status === "connecting" || status === "loading" || status === "finishing" || status === "polishing";
   const liveText = segments.join(" ");
   const finalText = draft.trim();
   const words = finalText ? finalText.split(/\s+/).length : liveText ? liveText.split(/\s+/).length : 0;
@@ -84,11 +99,37 @@ export default function Dictation({
     } catch {}
   };
 
+  const send = async () => {
+    if (!id || !email || !EMAIL_RE.test(email.to)) return;
+    setSendState("sending");
+    setSendError("");
+    try {
+      const url = new URL(`/dictations/${id}/send`, httpBase());
+      url.searchParams.set("sid", sid);
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: email.to, subject: email.subject, body: email.body }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        throw new Error(detail?.detail ?? `send failed (${res.status})`);
+      }
+      setSendState("sent");
+    } catch (e) {
+      setSendState("error");
+      setSendError(e instanceof Error ? e.message : "Couldn't send.");
+    }
+  };
+
   return (
     <div className="name-overlay" onClick={close}>
-      <div className="name-card dict-card" onClick={(e) => e.stopPropagation()}>
+      <div
+        className={`name-card dict-card${status === "done" ? " sheet" : ""}${status === "done" && isEmail ? " email" : ""}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="dict-head">
-          <h2 className="name-title dict-title">Dictation</h2>
+          <h2 className="name-title dict-title">{status === "done" && isEmail ? "Email" : "Dictation"}</h2>
           <span className={`dict-status ${status}`}>
             {(status === "listening" || status === "paused") && (
               <span ref={dotRef} className={`dict-dot${status === "paused" ? " paused" : ""}`} />
@@ -100,26 +141,80 @@ export default function Dictation({
 
         <p className="name-sub dict-sub">
           {status === "done"
-            ? "Read it over — you can edit before copying."
+            ? isEmail
+              ? "Fraise picked this up as an email — check the recipient before sending."
+              : "Read it over — you can edit before copying."
             : error && status !== "error"
               ? error
-              : note || "Speak naturally; pauses become punctuation breaks. Everything is transcribed on this machine."}
+              : note || "Speak naturally — pauses become punctuation, and it's polished automatically when you finish."}
         </p>
 
         {status === "error" ? (
           <div className="dict-error">{error || "Something went wrong."}</div>
+        ) : status === "done" && isEmail && email ? (
+          <div className="dict-email-form">
+            <label className="dict-field">
+              <span>To</span>
+              <input
+                type="email"
+                value={email.to}
+                placeholder="name@example.com"
+                onChange={(e) => setEmail({ ...email, to: e.target.value })}
+              />
+            </label>
+            <label className="dict-field">
+              <span>Subject</span>
+              <input
+                type="text"
+                value={email.subject}
+                onChange={(e) => setEmail({ ...email, subject: e.target.value })}
+              />
+            </label>
+            <label className="dict-field grow">
+              <span>Message</span>
+              <textarea
+                className="dict-text"
+                value={email.body}
+                onChange={(e) => setEmail({ ...email, body: e.target.value })}
+              />
+            </label>
+          </div>
         ) : status === "done" ? (
-          <textarea
-            className="editor-textarea dict-text"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Nothing was heard."
-          />
+          <>
+            <div className="dict-tabs" role="tablist">
+              <button
+                role="tab"
+                aria-selected={view === "polished"}
+                className={view === "polished" ? "on" : ""}
+                onClick={() => setView("polished")}
+                disabled={!polished}
+              >
+                Polished
+              </button>
+              <button
+                role="tab"
+                aria-selected={view === "raw"}
+                className={view === "raw" ? "on" : ""}
+                onClick={() => setView("raw")}
+              >
+                As spoken
+              </button>
+            </div>
+            <textarea
+              className="editor-textarea dict-text"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="Nothing was heard."
+            />
+          </>
         ) : (
           <div ref={feedRef} className="dict-feed" aria-live="polite">
-            {liveText ? (
+            {liveText || interim ? (
               <p>
                 {liveText}
+                {interim && (
+                  <span className="dict-interim">{liveText ? " " : ""}{interim}</span>
+                )}
                 {recording && <span className="caret" />}
               </p>
             ) : (
@@ -133,10 +228,7 @@ export default function Dictation({
         <div className="dict-actions">
           {recording && (
             <>
-              <button
-                className="dict-btn"
-                onClick={status === "paused" ? resume : pause}
-              >
+              <button className="dict-btn" onClick={status === "paused" ? resume : pause}>
                 {status === "paused" ? "Resume" : "Pause"}
               </button>
               <button className="dict-btn primary" onClick={stop} disabled={!liveText && status !== "paused"}>
@@ -144,8 +236,22 @@ export default function Dictation({
               </button>
             </>
           )}
-          {status === "finishing" && <button className="dict-btn primary" disabled>Transcribing…</button>}
-          {status === "done" && (
+          {(status === "finishing" || status === "polishing") && (
+            <button className="dict-btn primary" disabled>{STATUS_LABEL[status]}</button>
+          )}
+          {status === "done" && isEmail && email && (
+            <>
+              <button
+                className="dict-btn primary"
+                onClick={send}
+                disabled={!EMAIL_RE.test(email.to) || sendState === "sending" || sendState === "sent"}
+              >
+                {sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent ✓" : "Send"}
+              </button>
+              {sendState === "error" && <span className="dict-send-error">{sendError}</span>}
+            </>
+          )}
+          {status === "done" && !isEmail && (
             <>
               <button className="dict-btn primary" onClick={copy} disabled={!finalText}>
                 {copied ? "Copied ✓" : "Copy text"}
@@ -158,17 +264,21 @@ export default function Dictation({
               >
                 Turn into tasks
               </button>
-              <button className="dict-btn" onClick={() => void start()}>
-                Dictate again
-              </button>
             </>
+          )}
+          {status === "done" && !openId && (
+            <button className="dict-btn" onClick={() => void start()}>
+              Dictate again
+            </button>
           )}
           {status === "error" && (
             <button className="dict-btn primary" onClick={() => void start()}>
               Try again
             </button>
           )}
-          <span className="dict-count">{words ? `${words} word${words === 1 ? "" : "s"}` : ""}</span>
+          {status === "done" && !isEmail && (
+            <span className="dict-count">{words ? `${words} word${words === 1 ? "" : "s"}` : ""}</span>
+          )}
           <button className="dict-btn ghost" onClick={close}>
             {status === "done" ? "Close" : "Cancel"}
           </button>

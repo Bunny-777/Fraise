@@ -8,8 +8,15 @@ export type DictationStatus =
   | "listening"
   | "paused"
   | "finishing"
+  | "polishing"
   | "done"
   | "error";
+
+export interface DictationEmail {
+  to: string;
+  subject: string;
+  body: string;
+}
 
 const INPUT_RATE = 16_000;
 
@@ -23,6 +30,11 @@ function dictationWsUrl(sid: string): string {
 export function useDictation(sid: string) {
   const [status, setStatus] = useState<DictationStatus>("idle");
   const [segments, setSegments] = useState<string[]>([]);
+  const [interim, setInterim] = useState("");
+  const [id, setId] = useState<string | null>(null);
+  const [polished, setPolished] = useState("");
+  const [isEmail, setIsEmail] = useState(false);
+  const [email, setEmail] = useState<DictationEmail | null>(null);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState(0);
@@ -70,14 +82,23 @@ export function useDictation(sid: string) {
     return () => window.clearInterval(id);
   }, [status]);
 
+  const resetState = useCallback(() => {
+    setSegments([]);
+    setInterim("");
+    setId(null);
+    setPolished("");
+    setIsEmail(false);
+    setEmail(null);
+    setError("");
+    setNote("");
+    setElapsed(0);
+  }, []);
+
   const start = useCallback(async () => {
     if (startingRef.current) return;
     if (statusRef.current !== "idle" && statusRef.current !== "done" && statusRef.current !== "error") return;
     startingRef.current = true;
-    setSegments([]);
-    setError("");
-    setNote("");
-    setElapsed(0);
+    resetState();
     setStatus("connecting");
     pausedRef.current = false;
     pausedForRef.current = 0;
@@ -107,10 +128,22 @@ export function useDictation(sid: string) {
             break;
           case "segment":
             setSegments((prev) => [...prev, data.text as string]);
+            setInterim("");
+            break;
+          case "interim":
+            setInterim((data.text as string) ?? "");
+            break;
+          case "polishing":
+            setStatus("polishing");
             break;
           case "final": {
-            const text = (data.text as string) ?? "";
+            const text = (data.polished as string) || (data.text as string) || "";
             if (text) setSegments([text]);
+            setInterim("");
+            setId((data.id as string) ?? null);
+            setPolished((data.polished as string) ?? (data.text as string) ?? "");
+            setIsEmail(Boolean(data.is_email));
+            setEmail((data.email as DictationEmail) ?? null);
             setStatus("done");
             teardown();
             break;
@@ -181,7 +214,7 @@ export function useDictation(sid: string) {
       setStatus("error");
       teardown();
     }
-  }, [sid, teardown]);
+  }, [sid, teardown, resetState]);
 
   const pause = useCallback(() => {
     if (statusRef.current !== "listening") return;
@@ -211,15 +244,46 @@ export function useDictation(sid: string) {
     }
   }, [teardown, teardownAudio]);
 
+  const open = useCallback(
+    async (dictationId: string): Promise<void> => {
+      teardown();
+      resetState();
+      setStatus("polishing");
+      try {
+        const url = new URL(`/dictations/${dictationId}`, httpBase());
+        url.searchParams.set("sid", sid);
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`fetch failed (${res.status})`);
+        const d = await res.json();
+        setId(d.id);
+        setSegments([d.polished_text || d.raw_text || ""]);
+        setPolished(d.polished_text || d.raw_text || "");
+        setIsEmail(Boolean(d.is_email));
+        setEmail(
+          d.is_email
+            ? { to: d.email_to || "", subject: d.email_subject || "", body: d.email_body || "" }
+            : null,
+        );
+        setStatus("done");
+      } catch {
+        setError("Couldn't load that dictation.");
+        setStatus("error");
+      }
+    },
+    [sid, teardown, resetState],
+  );
+
   const cancel = useCallback(() => {
     teardown();
-    setSegments([]);
-    setNote("");
-    setError("");
+    resetState();
     setStatus("idle");
-  }, [teardown]);
+  }, [teardown, resetState]);
 
   useEffect(() => () => teardown(), [teardown]);
 
-  return { status, segments, note, error, elapsed, levelRef, start, pause, resume, stop, cancel };
+  return {
+    status, segments, interim, id, polished, isEmail, email, note, error, elapsed, levelRef,
+    start, pause, resume, stop, open, cancel,
+    setEmail,
+  };
 }
