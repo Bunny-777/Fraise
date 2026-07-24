@@ -73,6 +73,22 @@ _MIGRATIONS = [
     );
     CREATE INDEX idx_days_session ON days (session_id, created_at DESC);
     """,
+    """
+    CREATE TABLE dictations (
+        id TEXT PRIMARY KEY,
+        session_id TEXT,
+        raw_text TEXT,
+        polished_text TEXT,
+        is_email INTEGER DEFAULT 0,
+        email_to TEXT,
+        email_subject TEXT,
+        email_body TEXT,
+        status TEXT,
+        sent_to TEXT,
+        created_at TEXT
+    );
+    CREATE INDEX idx_dictations_session ON dictations (session_id, created_at DESC);
+    """,
 ]
 
 def connect() -> sqlite3.Connection:
@@ -170,6 +186,103 @@ def list_days(session_id: str, limit: int = 20) -> list[dict]:
             "created_at": row["created_at"],
         })
     return days
+
+
+def save_dictation(dictation_id: str, session_id: str, raw_text: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO dictations (id, session_id, raw_text, polished_text, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'raw', ?)",
+            (dictation_id, session_id, raw_text, raw_text, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_dictation_polish(
+    dictation_id: str,
+    session_id: str,
+    polished_text: str,
+    is_email: bool,
+    email_to: str,
+    email_subject: str,
+    email_body: str,
+) -> None:
+    conn = connect()
+    try:
+        conn.execute(
+            "UPDATE dictations SET polished_text = ?, is_email = ?, email_to = ?, "
+            "email_subject = ?, email_body = ?, status = 'polished' "
+            "WHERE id = ? AND session_id = ?",
+            (polished_text, int(is_email), email_to, email_subject, email_body, dictation_id, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_dictation_sent(dictation_id: str, session_id: str, sent_to: str) -> None:
+    conn = connect()
+    try:
+        conn.execute(
+            "UPDATE dictations SET status = 'sent', sent_to = ? WHERE id = ? AND session_id = ?",
+            (sent_to, dictation_id, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_dictation(dictation_id: str, session_id: str) -> dict | None:
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT id, raw_text, polished_text, is_email, email_to, email_subject, "
+            "email_body, status, sent_to, created_at FROM dictations "
+            "WHERE id = ? AND session_id = ?",
+            (dictation_id, session_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "raw_text": row["raw_text"],
+        "polished_text": row["polished_text"],
+        "is_email": bool(row["is_email"]),
+        "email_to": row["email_to"] or "",
+        "email_subject": row["email_subject"] or "",
+        "email_body": row["email_body"] or "",
+        "status": row["status"],
+        "sent_to": row["sent_to"],
+        "created_at": row["created_at"],
+    }
+
+
+def list_dictations(session_id: str, limit: int = 20) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, raw_text, polished_text, is_email, status, created_at FROM dictations "
+            "WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "id": row["id"],
+            "snippet": (row["polished_text"] or row["raw_text"] or "").strip()[:80],
+            "is_email": bool(row["is_email"]),
+            "status": row["status"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
 
 
 def save_artifact(artifact_id: str, session_id: str, title: str, fmt: str, body: str) -> None:

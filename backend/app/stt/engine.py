@@ -6,9 +6,15 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = os.getenv("STT_MODEL", "large-v3-turbo")
+MODEL_NAME = os.getenv("STT_MODEL", "base")
 DEVICE = os.getenv("STT_DEVICE", "auto")
 COMPUTE = os.getenv("STT_COMPUTE", "int8")
+BEAM_SIZE = int(os.getenv("STT_BEAM_SIZE", "1"))
+TEMPERATURE = float(os.getenv("STT_TEMPERATURE", "0.0"))
+CPU_THREADS = int(os.getenv("STT_CPU_THREADS", str(max(1, (os.cpu_count() or 4) - 4))))
+
+LIVE_MODEL_NAME = os.getenv("STT_LIVE_MODEL", "tiny")
+LIVE_CPU_THREADS = int(os.getenv("STT_LIVE_CPU_THREADS", "2"))
 
 SAMPLE_RATE = 16_000
 
@@ -23,8 +29,11 @@ _HALLUCINATIONS = {
 }
 
 _model = None
+_live_model = None
 _load_lock = threading.Lock()
+_live_load_lock = threading.Lock()
 _transcribe_lock = threading.Lock()
+_live_transcribe_lock = threading.Lock()
 
 
 def is_loaded() -> bool:
@@ -37,9 +46,42 @@ def load():
         if _model is None:
             from faster_whisper import WhisperModel
 
-            logger.info("loading STT model %s (device=%s compute=%s)", MODEL_NAME, DEVICE, COMPUTE)
-            _model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE)
+            logger.info(
+                "loading STT model %s (device=%s compute=%s cpu_threads=%s)",
+                MODEL_NAME, DEVICE, COMPUTE, CPU_THREADS,
+            )
+            _model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE, cpu_threads=CPU_THREADS)
     return _model
+
+
+def load_live():
+    global _live_model
+    with _live_load_lock:
+        if _live_model is None:
+            from faster_whisper import WhisperModel
+
+            logger.info(
+                "loading live caption model %s (device=%s compute=%s cpu_threads=%s)",
+                LIVE_MODEL_NAME, DEVICE, COMPUTE, LIVE_CPU_THREADS,
+            )
+            _live_model = WhisperModel(
+                LIVE_MODEL_NAME, device=DEVICE, compute_type=COMPUTE, cpu_threads=LIVE_CPU_THREADS
+            )
+    return _live_model
+
+
+def transcribe_interim(audio: np.ndarray, language: str | None = None) -> str:
+    model = load_live()
+    with _live_transcribe_lock:
+        segments, _info = model.transcribe(
+            audio,
+            language=language,
+            beam_size=1,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            no_speech_threshold=0.6,
+        )
+        return " ".join(seg.text.strip() for seg in segments if seg.text.strip())
 
 
 def transcribe(
@@ -60,8 +102,8 @@ def transcribe(
         segments, _info = model.transcribe(
             audio,
             language=language,
-            beam_size=5,
-            temperature=[0.0, 0.2, 0.4],
+            beam_size=BEAM_SIZE,
+            temperature=TEMPERATURE,
             initial_prompt=prompt,
             condition_on_previous_text=False,
             no_speech_threshold=0.55,

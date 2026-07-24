@@ -3,6 +3,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -25,8 +26,11 @@ from app.servers.memory import store as memory_store
 from app.servers.rag import embeddings, extract, reranker, store as rag_store
 from app.storage import db
 from app.host.voice_agent import bridge
-from app.stt import engine as stt_engine
+from app.servers import mailer
+from app.stt import engine as stt_engine, format as stt_format, punctuation
 from app.stt.segmenter import Segmenter
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +129,56 @@ async def day(day_id: str, sid: str = Query(...)) -> dict:
     return found
 
 
+@app.get("/dictations")
+async def dictations(sid: str = Query(...), limit: int = Query(20)) -> list[dict]:
+    return await anyio.to_thread.run_sync(db.list_dictations, sid, limit)
+
+
+@app.get("/dictations/{dictation_id}")
+async def dictation(dictation_id: str, sid: str = Query(...)) -> dict:
+    found = await anyio.to_thread.run_sync(db.get_dictation, dictation_id, sid)
+    if not found:
+        raise HTTPException(status_code=404, detail="no such dictation")
+    return found
+
+
+@app.post("/dictations/{dictation_id}/polish")
+async def repolish_dictation(dictation_id: str, sid: str = Query(...)) -> dict:
+    found = await anyio.to_thread.run_sync(db.get_dictation, dictation_id, sid)
+    if not found:
+        raise HTTPException(status_code=404, detail="no such dictation")
+    result = await stt_format.polish(found["raw_text"])
+    email = result["email"] or {}
+    await anyio.to_thread.run_sync(
+        db.update_dictation_polish, dictation_id, sid, result["polished"],
+        result["is_email"], email.get("to", ""), email.get("subject", ""), email.get("body", ""),
+    )
+    return await anyio.to_thread.run_sync(db.get_dictation, dictation_id, sid)
+
+
+@app.post("/dictations/{dictation_id}/send")
+async def send_dictation(dictation_id: str, sid: str = Query(...), body: dict = Body(...)) -> dict:
+    to = (body.get("to") or "").strip()
+    subject = (body.get("subject") or "").strip() or "(no subject)"
+    text = (body.get("body") or "").strip()
+    if not _EMAIL_RE.match(to):
+        raise HTTPException(status_code=400, detail="that doesn't look like a valid email address")
+    if not text:
+        raise HTTPException(status_code=400, detail="the email body is empty")
+    found = await anyio.to_thread.run_sync(db.get_dictation, dictation_id, sid)
+    if not found:
+        raise HTTPException(status_code=404, detail="no such dictation")
+    try:
+        await anyio.to_thread.run_sync(mailer.send_email, to, subject, text)
+    except mailer.MailerNotConfigured as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.exception("dictation email send failed")
+        raise HTTPException(status_code=502, detail=f"couldn't send: {exc}")
+    await anyio.to_thread.run_sync(db.mark_dictation_sent, dictation_id, sid, to)
+    return {"ok": True}
+
+
 @app.post("/dictate")
 async def dictate(sid: str = Query(...), body: dict = Body(...)) -> dict:
     text = (body.get("text") or "").strip()
@@ -177,6 +231,7 @@ _MAX_DICTATION_S = 3600
 @app.websocket("/ws/dictation")
 async def dictation_socket(ws: WebSocket) -> None:
     await ws.accept()
+    session_id = ws.query_params.get("sid") or uuid4().hex
     language = ws.query_params.get("language") or None
     hints = [h.strip() for h in (ws.query_params.get("hints") or "").split(",") if h.strip()]
 
@@ -196,7 +251,7 @@ async def dictation_socket(ws: WebSocket) -> None:
                 return
             try:
                 context = " ".join(transcript)[-400:]
-                text = await anyio.to_thread.run_sync(
+                raw_text = await anyio.to_thread.run_sync(
                     stt_engine.transcribe, utterance, context, hints, language
                 )
             except Exception:
@@ -204,9 +259,13 @@ async def dictation_socket(ws: WebSocket) -> None:
                 with contextlib.suppress(Exception):
                     await send({"type": "error", "message": "Transcription hiccuped — keep going."})
                 continue
+            text = punctuation.finalize_segment(raw_text)
             if text:
                 transcript.append(text)
                 await send({"type": "segment", "text": text})
+                await send({"type": "interim", "text": ""})
+
+    ready_event = asyncio.Event()
 
     async def announce() -> None:
         try:
@@ -214,6 +273,7 @@ async def dictation_socket(ws: WebSocket) -> None:
                 await send({"type": "info", "message": "Warming up the transcription model — the first run can take a minute. Keep talking, nothing is lost."})
             await anyio.to_thread.run_sync(stt_engine.load)
             await send({"type": "ready", "model": stt_engine.MODEL_NAME})
+            ready_event.set()
         except Exception:
             logger.exception("STT model failed to load")
             with contextlib.suppress(Exception):
@@ -221,7 +281,29 @@ async def dictation_socket(ws: WebSocket) -> None:
             with contextlib.suppress(Exception):
                 await ws.close()
 
+    _INTERIM_EVERY_S = 0.2
+    _INTERIM_WINDOW_S = 3.0
+
+    async def interim_loop() -> None:
+        await ready_event.wait()
+        last_sent = ""
+        while True:
+            await asyncio.sleep(_INTERIM_EVERY_S)
+            tail = await anyio.to_thread.run_sync(segmenter.peek_tail, _INTERIM_WINDOW_S)
+            if tail is None or len(tail) < 0.2 * stt_engine.SAMPLE_RATE:
+                continue
+            try:
+                raw_text = await anyio.to_thread.run_sync(stt_engine.transcribe_interim, tail, language)
+            except Exception:
+                continue
+            text = punctuation.apply_voice_commands(raw_text)
+            if text != last_sent:
+                last_sent = text
+                with contextlib.suppress(Exception):
+                    await send({"type": "interim", "text": text})
+
     announce_task = asyncio.create_task(announce())
+    interim_task = asyncio.create_task(interim_loop())
     worker_task = asyncio.create_task(worker())
     total_samples = 0
     try:
@@ -243,13 +325,44 @@ async def dictation_socket(ws: WebSocket) -> None:
                     continue
                 if event.get("type") == "stop":
                     break
+        interim_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await interim_task
         for utterance in await anyio.to_thread.run_sync(segmenter.flush):
             utterances.put_nowait(utterance)
         utterances.put_nowait(None)
         await worker_task
         worker_task = None
+
+        raw_text = punctuation.join_segments(transcript)
+        dictation_id = db.new_id()
+        if raw_text:
+            await anyio.to_thread.run_sync(db.save_dictation, dictation_id, session_id, raw_text)
+
+        result = {"polished": raw_text, "is_email": False, "email": None}
+        if raw_text:
+            with contextlib.suppress(Exception):
+                await send({"type": "polishing"})
+            try:
+                result = await stt_format.polish(raw_text)
+            except Exception:
+                logger.exception("dictation polish failed")
+            else:
+                email = result["email"] or {}
+                await anyio.to_thread.run_sync(
+                    db.update_dictation_polish, dictation_id, session_id, result["polished"],
+                    result["is_email"], email.get("to", ""), email.get("subject", ""), email.get("body", ""),
+                )
+
         with contextlib.suppress(Exception):
-            await send({"type": "final", "text": " ".join(transcript).strip()})
+            await send({
+                "type": "final",
+                "id": dictation_id if raw_text else None,
+                "text": raw_text,
+                "polished": result["polished"],
+                "is_email": result["is_email"],
+                "email": result["email"],
+            })
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -260,6 +373,9 @@ async def dictation_socket(ws: WebSocket) -> None:
         announce_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await announce_task
+        interim_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await interim_task
         if worker_task is not None:
             worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
