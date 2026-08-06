@@ -94,6 +94,19 @@ export async function uploadDocument(
   return res.json();
 }
 
+export function plainText(text: string): string {
+  return text
+    .replace(/\[([^\]]*)\]\(([^)]*)\)/g, (_m, label, href) => label || href)
+    .replace(/(\*\*\*|\*\*|__)(.+?)\1/gs, "$2")
+    .replace(/(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s*/gm, "")
+    .replace(/^\s*[-*•]\s+/gm, "")
+    .replace(/\s+[-•]\s+(?=\S)/g, " — ")
+    .replace(/`/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 const INPUT_RATE = 16_000;
 const OUTPUT_RATE = 24_000;
 const PLAYBACK_LEAD = 0.18;
@@ -125,8 +138,9 @@ export function useVoiceAgent(onRequestSwitch?: (name: string) => void) {
   switchRef.current = onRequestSwitch;
 
   const push = useCallback((role: Role, text: string) => {
-    if (!text?.trim()) return;
-    setMessages((m) => [...m, { id: crypto.randomUUID(), role, text }]);
+    const clean = plainText(text ?? "");
+    if (!clean) return;
+    setMessages((m) => [...m, { id: crypto.randomUUID(), role, text: clean }]);
   }, []);
 
   const stopPlayback = useCallback(() => {
