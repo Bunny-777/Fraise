@@ -1,7 +1,9 @@
 import { DocCover, Icon, type IconName } from "./icons";
 
 type Suggestion = { icon: IconName; label: string; text: string; accent?: boolean };
-type Doc = { name: string; chunks: number };
+type Doc = { name: string; chunks: number; kind: "document" | "recording" };
+
+const AUDIO = /\.(mp3|m4a|mp4|wav|aac|flac|ogg|opus|webm|mov|amr)$/i;
 
 export const QUOTE = "The best interface is a conversation you forget you're having.";
 
@@ -21,6 +23,14 @@ function titleOf(filename: string): string {
 function suggestionsFor(docs: Doc[]): Suggestion[] {
   if (!docs.length) return RESTING;
   const title = titleOf(docs[0].name);
+  if (docs[0].kind === "recording") {
+    return [
+      { icon: "doc", label: "Debrief", text: `Go through ${title} and pull out the action items`, accent: true },
+      { icon: "search", label: "Ask", text: `What did we decide on ${title}?` },
+      { icon: "web", label: "Research", text: "Research what that call was about" },
+      { icon: "recall", label: "Recall", text: "What have I asked you to remember?" },
+    ];
+  }
   return [
     { icon: "doc", label: "Summarize", text: `Summarize ${title}`, accent: true },
     { icon: "search", label: "Ask", text: `What does ${title} say about…?` },
@@ -43,14 +53,14 @@ export default function Board({ docs, uploading, receded }: BoardProps) {
     <div className={`board${receded ? " receded" : ""}`} aria-hidden={receded}>
       {hasDocs && (
         <section className="board-section">
-          <h2 className="board-label">Your documents</h2>
+          <h2 className="board-label">Your files</h2>
           <div className="docs-masonry">
             {uploading && (
               <div className="card doc-card pending">
                 <DocCover name={uploading} />
                 <div className="card-meta">
                   <span className="meta-name">{uploading}</span>
-                  <span className="chunks">adding…</span>
+                  <span className="chunks">{AUDIO.test(uploading) ? "transcribing…" : "adding…"}</span>
                 </div>
               </div>
             )}
@@ -59,7 +69,9 @@ export default function Board({ docs, uploading, receded }: BoardProps) {
                 <DocCover name={d.name} />
                 <div className="card-meta">
                   <span className="meta-name">{d.name}</span>
-                  <span className="chunks">{d.chunks} passages</span>
+                  <span className="chunks">
+                    {d.kind === "recording" ? `recording · ${d.chunks} passages` : `${d.chunks} passages`}
+                  </span>
                 </div>
               </div>
             ))}

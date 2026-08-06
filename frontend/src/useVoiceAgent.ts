@@ -11,6 +11,26 @@ export interface Message {
 type Status = "connecting" | "online" | "error";
 export type OrbState = "idle" | "listening" | "thinking" | "speaking";
 
+/** One thing a paused tool call is waiting to be told. */
+export interface ElicitField {
+  name: string;
+  type: "string" | "number" | "integer" | "boolean" | "enum";
+  label: string;
+  description: string;
+  choices: string[] | null;
+  required: boolean;
+  default: string | number | boolean | null;
+}
+
+export interface Elicitation {
+  id: string;
+  server: string;
+  tool: string;
+  message: string;
+  fields: ElicitField[];
+  sent: boolean;
+}
+
 const PROD_WS_URL = "wss://100-56-229-165.sslip.io/ws";
 const isLocalHost = ["localhost", "127.0.0.1"].includes(location.hostname);
 const WS_URL =
@@ -57,7 +77,11 @@ export function httpBase(): string {
   return url.origin;
 }
 
-export async function uploadDocument(file: File): Promise<{ filename: string; chunks: number }> {
+export type UploadKind = "document" | "recording";
+
+export async function uploadDocument(
+  file: File,
+): Promise<{ filename: string; chunks: number; kind: UploadKind }> {
   const url = new URL("/upload", httpBase());
   url.searchParams.set("sid", sessionId());
   const body = new FormData();
@@ -82,6 +106,7 @@ export function useVoiceAgent(onRequestSwitch?: (name: string) => void) {
   const [thinking, setThinking] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [authNeeded, setAuthNeeded] = useState<string | null>(null);
+  const [elicitation, setElicitation] = useState<Elicitation | null>(null);
 
   const levelRef = useRef(0);
   const outLevelRef = useRef(0);
@@ -209,6 +234,19 @@ export function useVoiceAgent(onRequestSwitch?: (name: string) => void) {
         case "auth_redirect":
           setAuthNeeded(data.url as string);
           break;
+        case "elicitation":
+          setElicitation({
+            id: data.id,
+            server: data.server ?? "",
+            tool: data.tool ?? "",
+            message: data.message ?? "",
+            fields: (data.fields ?? []) as ElicitField[],
+            sent: false,
+          });
+          break;
+        case "elicitation_resolved":
+          setElicitation((e) => (e && e.id !== data.id ? e : null));
+          break;
         case "switch_assistant":
           if (typeof data.name === "string") switchRef.current?.(data.name);
           break;
@@ -244,6 +282,7 @@ export function useVoiceAgent(onRequestSwitch?: (name: string) => void) {
     setListening(false);
     setThinking(false);
     setSpeaking(false);
+    setElicitation(null);
   }, [stopPlayback, clearThinkingWatchdog]);
 
   const start = useCallback(async () => {
@@ -331,12 +370,31 @@ export function useVoiceAgent(onRequestSwitch?: (name: string) => void) {
     setTimeout(() => void start(), 120);
   }, [stop, start]);
 
-  const notifyUpload = useCallback((filename: string) => {
+  const notifyUpload = useCallback((filename: string, kind: UploadKind) => {
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "document_uploaded", filename }));
+      ws.send(JSON.stringify({ type: "document_uploaded", filename, kind }));
     }
   }, []);
+
+  // Answering on screen sends exact values — an address or a choice that speech
+  // could garble goes back to the paused tool character for character.
+  const answerElicitation = useCallback(
+    (id: string, content: Record<string, unknown> | null) => {
+      const ws = wsRef.current;
+      if (ws?.readyState !== WebSocket.OPEN) return;
+      ws.send(
+        JSON.stringify({
+          type: "elicitation_response",
+          id,
+          action: content ? "accept" : "decline",
+          content,
+        }),
+      );
+      setElicitation((e) => (e && e.id === id ? { ...e, sent: true } : e));
+    },
+    [],
+  );
 
   useEffect(() => () => stop(), [stop]);
 
@@ -366,5 +424,7 @@ export function useVoiceAgent(onRequestSwitch?: (name: string) => void) {
     notifyUpload,
     authNeeded,
     clearAuth: () => setAuthNeeded(null),
+    elicitation,
+    answerElicitation,
   };
 }

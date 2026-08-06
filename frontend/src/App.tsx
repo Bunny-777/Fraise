@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useVoiceAgent, uploadDocument, type OrbState } from "./useVoiceAgent";
+import { useVoiceAgent, uploadDocument, type OrbState, type UploadKind } from "./useVoiceAgent";
 import {
   AVATAR_CHOICES,
   createAssistant,
@@ -16,6 +16,7 @@ import Board from "./Board";
 import Hero from "./Hero";
 import Dictation from "./Dictation";
 import DayView from "./DayView";
+import Elicit from "./Elicit";
 import { AgentPanel, ArtifactView } from "./Agents";
 import { useAgents } from "./useAgents";
 import { useDay, useDayHistory } from "./useDay";
@@ -133,7 +134,7 @@ export default function App() {
     [switchTo],
   );
 
-  const { messages, status, orbState, levelRef, outLevelRef, speechSupported, toggle, reconnect, notifyUpload, authNeeded, clearAuth, listening } = useVoiceAgent(handleVoiceSwitch);
+  const { messages, status, orbState, levelRef, outLevelRef, speechSupported, toggle, reconnect, notifyUpload, authNeeded, clearAuth, listening, elicitation, answerElicitation } = useVoiceAgent(handleVoiceSwitch);
 
   const { run, artifact, history, openId, openArtifact, dismiss: dismissRun } = useAgents(activeId);
 
@@ -201,7 +202,7 @@ export default function App() {
   };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [docs, setDocs] = useState<{ name: string; chunks: number }[]>([]);
+  const [docs, setDocs] = useState<{ name: string; chunks: number; kind: UploadKind }[]>([]);
   const [uploading, setUploading] = useState<string>("");
   const [docError, setDocError] = useState<string>("");
 
@@ -211,9 +212,9 @@ export default function App() {
     setUploading(file.name);
     setDocError("");
     try {
-      const { filename, chunks } = await uploadDocument(file);
-      setDocs((prev) => [{ name: filename, chunks }, ...prev.filter((d) => d.name !== filename)]);
-      notifyUpload(filename);
+      const { filename, chunks, kind } = await uploadDocument(file);
+      setDocs((prev) => [{ name: filename, chunks, kind }, ...prev.filter((d) => d.name !== filename)]);
+      notifyUpload(filename, kind);
     } catch (e) {
       setDocError(e instanceof Error ? e.message : "Upload failed");
       setTimeout(() => setDocError(""), 4000);
@@ -661,7 +662,7 @@ export default function App() {
           )}
 
           <section className="assistant-stage">
-            <div className={`hero${run || artifact || day ? " compact" : ""}`}>
+            <div className={`hero${run || artifact || day || elicitation ? " compact" : ""}`}>
               <Orb state={orbState} onClick={toggle} inputLevelRef={levelRef} outputLevelRef={outLevelRef} />
 
               <div className="caption-wrap">
@@ -672,6 +673,8 @@ export default function App() {
               </div>
             </div>
 
+            {elicitation && <Elicit ask={elicitation} onAnswer={answerElicitation} />}
+
             {artifact ? (
               <ArtifactView artifact={artifact} onClose={dismissRun} />
             ) : run ? (
@@ -679,12 +682,12 @@ export default function App() {
             ) : day ? (
               <DayView day={day} onClose={dismissDay} />
             ) : (
-              showBoard && <Board docs={docs} uploading={uploading} receded={orbState !== "idle"} />
+              !elicitation && showBoard && <Board docs={docs} uploading={uploading} receded={orbState !== "idle"} />
             )}
             <input
               ref={fileInputRef}
               type="file"
-              accept=".txt,.md,.pdf"
+              accept=".txt,.md,.pdf,.mp3,.m4a,.mp4,.wav,.aac,.flac,.ogg,.opus,.webm,.mov,.amr,audio/*"
               hidden
               onChange={(e) => handleFiles(e.target.files)}
             />
@@ -722,15 +725,15 @@ export default function App() {
                   e.preventDefault();
                   handleFiles(e.dataTransfer.files);
                 }}
-                title={docError || "Add a document — .txt, .md, .pdf"}
-                aria-label={docError || "Add a document"}
+                title={docError || "Add a document or a call recording — .txt, .md, .pdf, or audio"}
+                aria-label={docError || "Add a document or recording"}
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M12 16V4M8 8l4-4 4 4" />
                   <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
                 </svg>
                 <span className="dock-upload-label">
-                  {uploading ? "Adding…" : docError ? "Try again" : "Add document"}
+                  {uploading ? "Adding…" : docError ? "Try again" : "Add file"}
                 </span>
               </button>
             </div>
