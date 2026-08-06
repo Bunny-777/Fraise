@@ -47,6 +47,13 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r"\s+([.,;:!?])", r"\1", text)
     return text.strip(" -–—•*\t")
 
+PLAIN_TEXT_RULE = (
+    "Write PLAIN TEXT ONLY. No markdown of any kind: no asterisks, no bold, no "
+    "square brackets, no links, no headings, no backticks. Never write a URL — the "
+    "sources are listed separately, and a URL read aloud is unusable. Every line is "
+    "an ordinary English sentence."
+)
+
 class LLMUnavailable(RuntimeError):
     pass
 
@@ -88,8 +95,10 @@ async def complete(
             return _clean(r.json()["choices"][0]["message"]["content"])
     raise LLMUnavailable("Groq rate limit — out of retries")
 
-async def complete_json(system: str, user: str, *, model: str = "") -> dict:
-    raw = await complete(system, user, json_mode=True, model=model)
+async def complete_json(
+    system: str, user: str, *, model: str = "", max_tokens: int | None = None
+) -> dict:
+    raw = await complete(system, user, json_mode=True, model=model, max_tokens=max_tokens)
     try:
         return json.loads(raw) if isinstance(json.loads(raw), dict) else {}
     except json.JSONDecodeError:

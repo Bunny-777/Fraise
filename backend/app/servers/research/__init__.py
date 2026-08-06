@@ -132,13 +132,6 @@ async def _plan(query: str, hint: str) -> list[dict]:
         return _fallback_plan(query)
     return agents
 
-_PLAIN_TEXT_RULE = (
-    "Write PLAIN TEXT ONLY. No markdown of any kind: no asterisks, no bold, no "
-    "square brackets, no links, no headings, no backticks. Never write a URL — the "
-    "sources are listed separately, and a URL read aloud is unusable. Every line is "
-    "an ordinary English sentence."
-)
-
 def _agent_system(label: str, angle: str) -> str:
     return (
         f"You are the {label} research agent. You are given search results. "
@@ -148,7 +141,7 @@ def _agent_system(label: str, angle: str) -> str:
         "a result is visibly outdated (an old year, a past cycle or season) and fresher "
         "results are also present, prefer the fresher ones and skip the stale one rather "
         f"than reporting both as current.\n\n{_today_line()}\n\n"
-        + _PLAIN_TEXT_RULE
+        + llm.PLAIN_TEXT_RULE
     )
 
 async def _run_agent(spec: dict, run_id: str, session_id: str) -> dict:
@@ -228,7 +221,7 @@ _SYNTH_SYSTEM = (
     "the write-up.\n"
     '  "sections": an array of 3-6 objects, each {"heading": str, "bullets": [str, ...]}\n'
     "Each bullet is one concrete, specific sentence.\n\n"
-    + _PLAIN_TEXT_RULE
+    + llm.PLAIN_TEXT_RULE
 )
 
 async def _synthesize(query: str, agent_results: list[dict]) -> dict:
