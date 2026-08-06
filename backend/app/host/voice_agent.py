@@ -10,12 +10,46 @@ import anyio
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
+from app.host import elicitation
 from app.host.mcp_manager import manager
 from app.servers.memory import store as memory_store
 
 _ACTION_TIMEOUT = 90
 
 _TOOL_TIMEOUT = 15
+
+# The host's own tool. Servers never see it: it exists so the model has a way to
+# hand back an answer to a question a server stopped mid-call to ask.
+ANSWER_TOOL = "provide_requested_input"
+ANSWER_FUNCTION = {
+    "name": ANSWER_TOOL,
+    "description": (
+        "Answer the question a tool stopped to ask, and let that tool finish. Call "
+        "this only after a tool has come back asking for input and you've asked the "
+        "user out loud and heard their reply. Pass exactly what they said as answer. "
+        "If the tool asked for several things at once, pass values instead: a JSON "
+        "object with one entry per requested field. Set declined to true if the user "
+        "refuses or wants to drop it."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "answer": {
+                "type": "string",
+                "description": "What the user said, in their own words.",
+            },
+            "values": {
+                "type": "string",
+                "description": "JSON object of field name to value, when several were asked for.",
+            },
+            "declined": {
+                "type": "boolean",
+                "description": "True if the user declined to answer or called it off.",
+            },
+        },
+        "required": [],
+    },
+}
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +73,21 @@ PROMPT = (
     "call the remember tool. When a question might depend on something they told you "
     "before — a preference, a name, a detail — call recall first, then answer. Use "
     "forget when they ask you to drop something.\n\n"
-    "Documents: the user can upload documents — text, Markdown, or PDF. Whenever a "
-    "question might touch their files, notes, or documents, call the ask tool and base "
-    "your answer only on what it returns; never guess at what a document says. Use "
-    "summarize for an overview of a document and list_documents to tell them what "
-    "they've uploaded. When you're told a document was just uploaded, call summarize "
-    "for it and give a warm one- or two-sentence summary of what it's about, then "
-    "invite them to ask questions.\n\n"
+    "Documents and recordings: the user can upload documents — text, Markdown, or "
+    "PDF — and call recordings, which are transcribed for you automatically. "
+    "Whenever a question might touch their files, notes, documents, or something "
+    "said on a recorded call, call the ask tool and base your answer only on what it "
+    "returns; never guess at what a document says. Use summarize for an overview of "
+    "a document, recording_insights for a call recording — it writes up the "
+    "decisions, action items, and follow-ups — and list_documents to tell them what "
+    "they've uploaded.\n\n"
+    "When something is just uploaded: don't dive in. Ask, in one short sentence, "
+    "whether they want you to go through it or research what it's about, and wait "
+    "for their answer. If they want it gone through, call recording_insights for a "
+    "recording or summarize for a document. If they want research, call "
+    "deep_research on the subject — if you don't know the subject yet, call "
+    "summarize first and research what it turns out to be about. Do one or the "
+    "other, never both, and never before they've chosen.\n\n"
     "Web search: for a quick, single fact that needs current information, use the "
     "search tools and answer only from what they return. Never invent a search "
     "result or a fact you're not sure of.\n\n"
@@ -59,12 +101,27 @@ PROMPT = (
     "it hands back, then stop talking. Do not invent findings, do not describe results "
     "you were not given, and do not call it twice for the same request — the write-up "
     "appears on their screen by itself when the agents finish.\n\n"
+    "Email: when the user wants to send an email, call send_email with what they "
+    "want it to say and a short subject. Only fill in the recipient if they said "
+    "an address out loud; leave it empty otherwise. Don't ask for the address or "
+    "for confirmation yourself — the tool asks for whatever it still needs, and "
+    "nothing is sent until it does.\n\n"
     "Weather: when asked about current weather or conditions somewhere, call "
-    "get_weather with the place name. If they haven't said where, ask before "
-    "calling it — never guess a location or invent conditions.\n\n"
+    "get_weather with the place name, or with no location at all if they haven't "
+    "said where — it'll ask. Never guess a location or invent conditions.\n\n"
     "Files: the user has a local folder Fraise can read and write. When they ask "
     "about files — listing, reading, creating, or editing one — use the filesystem "
     "tools rather than guessing at what's there.\n\n"
+    "When a tool asks you something: a tool can come back needing something it "
+    "doesn't have instead of a result — you'll get a needs_input reply with a "
+    "question in it. That tool is paused mid-job, waiting. Ask the user that "
+    "question out loud, in your own words, in one short natural sentence — never "
+    "read the raw question or mention tools, fields, or forms. When they answer, "
+    "call provide_requested_input with exactly what they said, and the paused tool "
+    "picks up where it left off. It may ask again; that's fine, ask again too. If "
+    "they say no or change their mind, call it with declined set to true. Never "
+    "guess an answer on their behalf, and never re-call the original tool to "
+    "supply it — provide_requested_input is the only way back into a paused call.\n\n"
     "How you think: be decisive. Work out what the person actually wants and go do "
     "it — don't ask permission for something they've already asked for, and don't "
     "offer to do a thing instead of doing it. If a request is ambiguous in a way "
@@ -212,7 +269,7 @@ async def _build_settings(
                 "model": os.environ.get("DEEPGRAM_THINK_MODEL", "gpt-4o-mini"),
             },
             "prompt": prompt,
-            "functions": manager.functions(),
+            "functions": [*manager.functions(), ANSWER_FUNCTION],
         },
         "speak": {"provider": {"type": "deepgram", "model": voice or os.environ.get("DEEPGRAM_VOICE", "aura-2-thalia-en")}},
     }
@@ -228,31 +285,112 @@ async def _build_settings(
         "agent": agent,
     }
 
-def _translate(text: str) -> str:
+def _translate(text: str) -> str | None:
+    """Turn a message from the browser into something Deepgram understands."""
     try:
         event = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return text
-    if event.get("type") != "document_uploaded":
-        return text
-    raw_filename = event.get("filename") or ""
-    name = Path(raw_filename).stem if raw_filename else "the document"
+
+    kind = event.get("type")
+    if kind == "document_uploaded":
+        raw_filename = event.get("filename") or ""
+        recording = event.get("kind") == "recording"
+        name = Path(raw_filename).stem if raw_filename else (
+            "the recording" if recording else "the document"
+        )
+        what = "a call recording" if recording else "a document"
+        read = "go through it" if recording else "read it"
+        return json.dumps({
+            "type": "InjectUserMessage",
+            "content": f'I just uploaded {what} called "{name}". Ask me whether I want '
+                       f"you to {read} or research what it's about, then wait for my "
+                       "answer before doing either.",
+        })
+
+    if kind == "elicitation_response":
+        return _stage_elicitation(event)
+
+    return text
+
+def _stage_elicitation(event: dict) -> str | None:
+    """Take an answer typed into the card and say it on the user's behalf.
+
+    The values are held exactly as submitted so speech can't garble an address or
+    a choice, but the model still drives the conversation: it hears that the
+    question was answered and calls back in to resume the paused tool.
+    """
+    pending = elicitation.by_id(str(event.get("id") or ""))
+    if pending is None:
+        return None
+
+    fields = elicitation.describe(pending.schema)
+    raw = event.get("content")
+    submitted = raw if isinstance(raw, dict) else None
+    content, problem = elicitation.coerce(fields, "", submitted) if submitted else (None, "")
+    declined = event.get("action") == "decline" or content is None
+
+    if problem:
+        logger.warning("card answer for %s didn't fit the schema: %s", pending.id, problem)
+
+    elicitation.stage(pending, "decline" if declined else "accept", content)
+    if declined:
+        spoken = "I've cancelled that — never mind."
+    else:
+        spoken = f"I filled that in on screen — {elicitation.summarize(fields, content)}."
     return json.dumps({
         "type": "InjectUserMessage",
-        "content": f'I just uploaded a document called "{name}". '
-                   "Give me a short summary of what it's about.",
+        "content": f"{spoken} Use it to finish what you were doing.",
     })
 
-async def _run_tool(fn: dict, session_id: str) -> str:
+async def _invoke(fn: dict, session_id: str) -> str:
+    """Run one tool to completion, turning any failure into speakable text."""
     try:
         args = json.loads(fn.get("arguments") or "{}")
-        return await asyncio.wait_for(manager.call(fn["name"], args, session_id), _TOOL_TIMEOUT)
-    except asyncio.TimeoutError:
-        logger.warning("tool %r timed out after %ds", fn.get("name"), _TOOL_TIMEOUT)
-        return json.dumps({"error": "That took too long, so I stopped. Please try again."})
+        return await manager.call(fn["name"], args, session_id)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         logger.exception("tool %r failed", fn.get("name"))
         return json.dumps({"error": str(exc)})
+
+async def _run_tool(fn: dict, session_id: str) -> str:
+    try:
+        return await asyncio.wait_for(_invoke(fn, session_id), _TOOL_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning("tool %r timed out after %ds", fn.get("name"), _TOOL_TIMEOUT)
+        return json.dumps({"error": "That took too long, so I stopped. Please try again."})
+
+async def _settle(
+    call: asyncio.Task, session_id: str, tool: str
+) -> tuple[str | None, elicitation.Pending | None]:
+    """Wait on a tool call, but hand back early if it stops to ask something.
+
+    A call that pauses on an elicitation keeps running — the coroutine is sitting
+    inside the server, holding the work it has already done — so the timeout only
+    applies while the tool is working, never while a person is being asked.
+    """
+    asking = asyncio.create_task(elicitation.next_for(session_id, tool))
+    try:
+        done, _ = await asyncio.wait(
+            {call, asking}, timeout=_TOOL_TIMEOUT, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        if not asking.done():
+            asking.cancel()
+
+    if call in done:
+        if call.cancelled():
+            return json.dumps({"error": "That was dropped before it finished."}), None
+        return call.result(), None
+    if asking in done:
+        pending = asking.result()
+        pending.call = call
+        return None, pending
+
+    call.cancel()
+    logger.warning("tool %r timed out after %ds", tool, _TOOL_TIMEOUT)
+    return json.dumps({"error": "That took too long, so I stopped. Please try again."}), None
 
 def _extract_action(content: str) -> dict | None:
     try:
@@ -282,11 +420,83 @@ async def _resolve_action(fn: dict, session_id: str, browser: WebSocket, action:
             return content
     return json.dumps({"error": "The action timed out. Please try again."})
 
+async def _ask_out_loud(browser: WebSocket, pending: elicitation.Pending) -> str:
+    """Put the question on screen, and give the model its half of the job."""
+    fields = elicitation.describe(pending.schema)
+    await browser.send_text(json.dumps({
+        "type": "elicitation",
+        "id": pending.id,
+        "server": pending.server,
+        "tool": pending.tool,
+        "message": pending.message,
+        "fields": fields,
+    }))
+    logger.info("%s is asking: %s", pending.tool, pending.message)
+    return json.dumps({
+        "status": "needs_input",
+        "question": pending.message,
+        "asks_for": fields,
+        "next_step": (
+            "Ask the user this out loud in your own words, then call "
+            f"{ANSWER_TOOL} with their reply. Do not call {pending.tool} again."
+        ),
+    })
+
+async def _answer(browser: WebSocket, fn: dict, session_id: str) -> tuple[str, elicitation.Pending | None]:
+    """Feed the model's answer back into the paused call and let it finish."""
+    pending = elicitation.pending_for(session_id)
+    if pending is None or pending.call is None:
+        logger.info("model answered a question that isn't open: %s", fn.get("arguments"))
+        return json.dumps({"error": "Nothing is waiting on an answer right now."}), None
+
+    args = json.loads(fn.get("arguments") or "{}")
+    fields = elicitation.describe(pending.schema)
+
+    if pending.staged is not None:
+        # The user filled the card in the app, so use those values exactly rather
+        # than whatever came back through speech.
+        action, content = pending.staged
+    elif args.get("declined"):
+        action, content = "decline", None
+    else:
+        raw_values = args.get("values")
+        try:
+            values = json.loads(raw_values) if isinstance(raw_values, str) and raw_values.strip() else raw_values
+        except json.JSONDecodeError:
+            values = None
+        content, problem = elicitation.coerce(
+            fields, str(args.get("answer") or ""), values if isinstance(values, dict) else None
+        )
+        if problem:
+            # The question stays open; the model gets told what's still missing.
+            return json.dumps({"status": "needs_input", "question": pending.message, "problem": problem}), None
+        action = "accept"
+
+    elicitation.resolve(pending, action, content)
+    result, next_pending = await _settle(pending.call, session_id, pending.tool)
+    if next_pending is not None:
+        return await _ask_out_loud(browser, next_pending), next_pending
+
+    await browser.send_text(json.dumps({
+        "type": "elicitation_resolved",
+        "id": pending.id,
+        "outcome": action,
+        "answer": elicitation.summarize(fields, content) if action == "accept" else "",
+    }))
+    return result or "", None
+
 async def _run_one_function_call(dg, browser: WebSocket, fn: dict, session_id: str) -> None:
     fn_id = fn.get("id")
     fn_name = fn.get("name", "")
     try:
-        content = await _run_tool(fn, session_id)
+        if fn_name == ANSWER_TOOL:
+            content, _ = await _answer(browser, fn, session_id)
+        else:
+            call = asyncio.create_task(_invoke(fn, session_id))
+            content, pending = await _settle(call, session_id, fn_name)
+            if pending is not None:
+                content = await _ask_out_loud(browser, pending)
+
         action = _extract_action(content)
         if action:
             if action.get("once"):
@@ -340,7 +550,8 @@ async def bridge(
                 if (data := msg.get("bytes")) is not None:
                     await dg.send(data)
                 elif (text := msg.get("text")) is not None:
-                    await dg.send(_translate(text))
+                    if (translated := _translate(text)) is not None:
+                        await dg.send(translated)
 
         async def dg_to_browser() -> None:
             step_count = 0
@@ -392,3 +603,6 @@ async def bridge(
         except WebSocketDisconnect:
             b2d.cancel()
             d2b.cancel()
+        finally:
+            # Nobody is left to answer, so let any half-finished tool call go.
+            elicitation.close_session(session_id)
