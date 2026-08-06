@@ -23,7 +23,7 @@ from app.host.mcp_manager import manager
 from app.servers.calculator import mcp
 from app.servers import daily
 from app.servers.memory import store as memory_store
-from app.servers.rag import embeddings, extract, reranker, store as rag_store
+from app.servers.rag import embeddings, extract, reranker, store as rag_store, transcribe
 from app.storage import db
 from app.host.voice_agent import bridge
 from app.servers import mailer
@@ -47,11 +47,15 @@ async def lifespan(_: FastAPI):
     async with mcp.session_manager.run():
         await manager.connect_all()
         warm_task = asyncio.create_task(anyio.to_thread.run_sync(_warm_rag))
-        yield
-        warm_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await warm_task
-    await manager.aclose()
+        try:
+            yield
+        finally:
+            warm_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await warm_task
+            # Servers are connected inside this block, so they have to be let go
+            # inside it too — their transports nest in the session manager's scope.
+            await manager.aclose()
 
 def _warm_rag() -> None:
     try:
@@ -196,14 +200,23 @@ async def dictate(sid: str = Query(...), body: dict = Body(...)) -> dict:
 @app.post("/upload")
 async def upload(sid: str = Query(...), file: UploadFile = ...) -> dict:
     raw = await file.read()
-    try:
-        text = extract.extract_text(file.filename or "", raw)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    filename = file.filename or ""
+    if extract.is_audio(filename):
+        try:
+            text = await transcribe.transcribe(raw, file.content_type or "")
+        except transcribe.TranscriptionFailed as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        kind, empty = "recording", "I couldn't hear any speech in that recording"
+    else:
+        try:
+            text = extract.extract_text(filename, raw)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        kind, empty = "document", "no readable text in that file"
     if not text:
-        raise HTTPException(status_code=400, detail="no readable text in that file")
+        raise HTTPException(status_code=400, detail=empty)
     return await anyio.to_thread.run_sync(
-        rag_store.add_document, sid, file.filename, text
+        rag_store.add_document, sid, filename, text, kind
     )
 
 @app.websocket("/ws")
