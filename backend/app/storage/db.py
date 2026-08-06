@@ -89,6 +89,9 @@ _MIGRATIONS = [
     );
     CREATE INDEX idx_dictations_session ON dictations (session_id, created_at DESC);
     """,
+    """
+    ALTER TABLE documents ADD COLUMN kind TEXT NOT NULL DEFAULT 'document';
+    """,
 ]
 
 def connect() -> sqlite3.Connection:

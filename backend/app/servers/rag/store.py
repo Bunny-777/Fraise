@@ -14,14 +14,14 @@ def _match_query(text: str) -> str:
     terms = re.findall(r"\w+", text)
     return " OR ".join(f'"{t}"' for t in terms)
 
-def add_document(session_id: str, filename: str, text: str) -> dict:
+def add_document(session_id: str, filename: str, text: str, kind: str = "document") -> dict:
     token_vectors, spans = embeddings.encode_tokens(text)
     now = datetime.now(timezone.utc).isoformat()
     with closing(connect()) as conn, conn:
         cur = conn.execute(
-            "INSERT INTO documents (session_id, filename, uploaded_at, char_count, text) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (session_id, filename, now, len(text), text),
+            "INSERT INTO documents (session_id, filename, uploaded_at, char_count, text, kind) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, filename, now, len(text), text, kind),
         )
         document_id = cur.lastrowid
         n_chunks = 0
@@ -37,7 +37,7 @@ def add_document(session_id: str, filename: str, text: str) -> dict:
                 (chunk_id, session_id, sqlite_vec.serialize_float32(vector.tolist())),
             )
             n_chunks = ordinal + 1
-    return {"filename": filename, "chunks": n_chunks}
+    return {"filename": filename, "chunks": n_chunks, "kind": kind}
 
 def search(session_id: str, query: str, k: int = 5, n: int = 30) -> list[str]:
     qvec = embeddings.encode_query(query)
@@ -80,27 +80,24 @@ def _rrf_fuse(*ranked_lists: list[int]) -> list[int]:
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (_RRF_K + rank + 1)
     return sorted(scores, key=scores.get, reverse=True)
 
-def list_documents(session_id: str) -> list[str]:
+def list_documents(session_id: str) -> list[dict]:
     with closing(connect()) as conn:
         rows = conn.execute(
-            "SELECT filename FROM documents WHERE session_id = ? ORDER BY id DESC",
+            "SELECT filename, kind FROM documents WHERE session_id = ? ORDER BY id DESC",
             (session_id,),
         ).fetchall()
-    return [r["filename"] for r in rows]
+    return [{"filename": r["filename"], "kind": r["kind"]} for r in rows]
 
 def get_document_text(session_id: str, filename: str = "", budget: int = 6000) -> str:
     with closing(connect()) as conn:
-        if not filename:
-            row = conn.execute(
-                "SELECT text FROM documents WHERE session_id = ? ORDER BY id DESC LIMIT 1",
-                (session_id,),
-            ).fetchone()
-            return row["text"][:budget] if row else ""
-
         rows = conn.execute(
             "SELECT filename, text FROM documents WHERE session_id = ? ORDER BY id DESC",
             (session_id,),
         ).fetchall()
+    if not rows:
+        return ""
+    if not filename:
+        return rows[0]["text"][:budget]
     target = Path(filename).stem.lower()
     match = next(
         (r for r in rows if r["filename"] == filename or Path(r["filename"]).stem.lower() == target),
