@@ -6,10 +6,15 @@ import re
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+import mcp.types as types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.shared.memory import create_connected_server_and_client_session
+
+from app.host import elicitation
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +23,9 @@ _UNSAFE = re.compile(r"[^a-zA-Z0-9_-]")
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 _INJECTED_PARAMS = ("session_id",)
+
+class ToolFailed(RuntimeError):
+    """A server ran the tool and reported it as failed."""
 
 def _expand_env(value: Any) -> Any:
     if isinstance(value, str):
@@ -76,25 +84,64 @@ class MCPManager:
             len(self._servers), len(self._route),
         )
 
-    def _register(self, name: str, handle: Any, tools: list, builtin: bool) -> None:
+    def _register(self, name: str, session: ClientSession, tools: list) -> None:
         tools = list(tools)
         self._servers[name] = {
-            "handle": handle,
+            "session": session,
             "tools": tools,
             "by_name": {t.name: t for t in tools},
-            "builtin": builtin,
+            # Voice sessions with a call currently running against this server,
+            # so a question the server raises can be routed back to the right one.
+            "callers": {},
         }
+
+    def _elicitation_handler(self, name: str):
+        """Route this server's questions to whoever it's currently working for."""
+        async def handle(context, params) -> types.ElicitResult | types.ErrorData:
+            if getattr(params, "mode", "form") != "form":
+                return types.ErrorData(
+                    code=types.INVALID_PARAMS,
+                    message="Fraise only speaks form-mode elicitation.",
+                )
+            callers = (self._servers.get(name) or {}).get("callers") or {}
+            if len(callers) != 1:
+                # A question only means something if it's clear who is being
+                # asked. With no call in flight, or several at once, there's no
+                # honest answer to give, so the server is told so plainly.
+                logger.warning(
+                    "%r asked for input with %d call(s) in flight; declining", name, len(callers)
+                )
+                return types.ElicitResult(action="decline")
+
+            session_id, tool = next(iter(callers.values()))
+            action, content = await elicitation.request(
+                session_id=session_id,
+                server=name,
+                tool=tool,
+                message=params.message,
+                schema=params.requestedSchema,
+            )
+            return types.ElicitResult(action=action, content=content)
+
+        return handle
 
     async def _connect(self, name: str, spec: dict) -> None:
         spec = _expand_env(spec)
         kind = spec.get("type", "stdio")
+        elicit = self._elicitation_handler(name)
 
-        if kind == "builtin":
-            module = importlib.import_module(spec["module"])
-            handle = getattr(module, spec.get("attr", "mcp"))
-            self._register(name, handle, await handle.list_tools(), builtin=True)
-        else:
-            async with AsyncExitStack() as scoped:
+        async with AsyncExitStack() as scoped:
+            if kind == "builtin":
+                # Builtin servers speak the protocol over an in-process transport
+                # rather than being called directly, so that everything the spec
+                # adds on top of a plain function call — elicitation included —
+                # works the same whether a skill lives here or across a socket.
+                module = importlib.import_module(spec["module"])
+                server = getattr(module, spec.get("attr", "mcp"))
+                session = await scoped.enter_async_context(
+                    create_connected_server_and_client_session(server, elicitation_callback=elicit)
+                )
+            else:
                 if kind == "http":
                     read, write, _ = await scoped.enter_async_context(
                         streamablehttp_client(spec["url"], headers=spec.get("headers"))
@@ -108,11 +155,14 @@ class MCPManager:
                     )
                     read, write = await scoped.enter_async_context(stdio_client(params))
 
-                session = await scoped.enter_async_context(ClientSession(read, write))
+                session = await scoped.enter_async_context(
+                    ClientSession(read, write, elicitation_callback=elicit)
+                )
                 await session.initialize()
-                tools = (await session.list_tools()).tools
-                self._register(name, session, tools, builtin=False)
-                self._stack.push_async_callback(scoped.pop_all().aclose)
+
+            tools = (await session.list_tools()).tools
+            self._register(name, session, tools)
+            self._stack.push_async_callback(scoped.pop_all().aclose)
 
         count = len(self._servers[name]["tools"])
         logger.info("connected %r (%s) — %d tool(s)", name, kind, count)
@@ -169,16 +219,17 @@ class MCPManager:
         if "session_id" in (tool.inputSchema.get("properties") or {}):
             arguments = {**arguments, "session_id": session_id or ""}
 
-        if server["builtin"]:
-            content, structured = await server["handle"].call_tool(tname, arguments)
-            return _flatten_structured(structured) or "".join(
-                getattr(b, "text", "") for b in (content or [])
-            ).strip()
+        call_id = uuid4().hex
+        server["callers"][call_id] = (session_id or "", public_name)
+        try:
+            result = await server["session"].call_tool(tname, arguments)
+        finally:
+            server["callers"].pop(call_id, None)
 
-        result = await server["handle"].call_tool(tname, arguments)
-        return _flatten_structured(getattr(result, "structuredContent", None)) or "".join(
-            getattr(b, "text", "") for b in (result.content or [])
-        ).strip()
+        text = "".join(getattr(b, "text", "") for b in (result.content or [])).strip()
+        if result.isError:
+            raise ToolFailed(text or "the tool failed without saying why")
+        return _flatten_structured(getattr(result, "structuredContent", None)) or text
 
     async def aclose(self) -> None:
         await self._stack.aclose()
