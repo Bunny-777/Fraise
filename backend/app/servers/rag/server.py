@@ -19,7 +19,12 @@ async def ask(question: str, session_id: str = "") -> str:
     passages = await anyio.to_thread.run_sync(store.search, session_id, question)
     if not passages:
         return "I couldn't find anything about that in your documents."
-    return "Here's what your documents say: " + " … ".join(passages)
+    return (
+        "Answer the user out loud in one or two natural sentences, using only the "
+        "passages below. Speak in your own words — never read them back or copy "
+        "their wording, layout, or formatting. No markdown, no asterisks, no "
+        "bullet points, no square brackets.\n\nPassages:\n" + " … ".join(passages)
+    )
 
 @mcp.tool(description="Summarize an uploaded document.\n\nfilename: which document to summarize. Leave blank for the most recent upload.")
 async def summarize(filename: str = "", session_id: str = "") -> str:
@@ -28,7 +33,15 @@ async def summarize(filename: str = "", session_id: str = "") -> str:
     text = await anyio.to_thread.run_sync(store.get_document_text, session_id, filename)
     if not text:
         return "I don't have that document to summarize."
-    return "Here's the document — summarize it for the user: " + text
+    return (
+        "Summarize this out loud in two or three natural spoken sentences: what it "
+        "is, and the few things that actually matter in it. Speak in your own words "
+        "— never copy its wording, layout, headings, or formatting, and never read "
+        "it back section by section. No markdown, no asterisks, no bullet points, no "
+        "square brackets, no headings. Don't recite phone numbers, email addresses, "
+        "or links unless the user asks for them. Finish by inviting a question."
+        "\n\nDocument:\n" + text
+    )
 
 @mcp.tool(description=(
     "Debrief an uploaded call recording: what happened, what was decided, what "
