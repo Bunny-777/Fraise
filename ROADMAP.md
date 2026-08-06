@@ -58,7 +58,8 @@ A private MCP server over your own calendar. Tokens and event data are stored on
 - [x] **Conversation continuity** (host + storage) — every user/assistant turn is logged to a `conversation_turns` table (migration 3), keyed on the same session id as memory. On connect, recent turns are folded into the prompt, so a reload, a dropped socket, or a return visit days later doesn't start cold — distinct from the explicit `remember`/`recall` tools, which are for things the user asks Fraise to keep, not the conversation itself.
 - [x] **Date/time awareness** (host) — the prompt is given the actual current date and UTC time on every connect, so "today"/"tomorrow"/deadline questions don't get answered from stale training data.
 - [ ] **Progress narration** (host) — long-running calls speak MCP progress events.
-- [ ] **Call recording insights** — extend `/upload` + the RAG pipeline to accept audio files (today capped at `.txt`/`.md`/`.pdf`), transcribe via Deepgram's pre-recorded API (reusing the existing `DEEPGRAM_API_KEY`, no new provider), then run the same LLM-summarization pattern `deep_research`'s synthesis step uses to speak back a summary plus decisions, action items, and follow-ups. Upload-only — you bring an existing recording from your phone, Zoom, Meet, etc. Deliberately not live call-recording: capturing a call as it happens needs a calling-platform integration (Twilio/Zoom/Meet bots) and raises real multi-party consent issues that vary by state and country, so that's out of scope here.
+- [x] **Call recording insights** — `/upload` now takes audio as well as `.txt`/`.md`/`.pdf`. A recording goes to Deepgram's pre-recorded API (`rag/transcribe.py`, reusing the existing `DEEPGRAM_API_KEY` — no new provider), comes back diarized into speaker-labelled lines, and is stored as a document, so it's searchable by the same `ask` as everything else. On top of that, `recording_insights` (`rag/insights.py`) runs the transcript through the same LLM-synthesis pattern `deep_research` uses: what happened, decisions, action items, follow-ups, saved as an artifact the user reads on screen while Fraise speaks the headline. Uploads are tagged `document` or `recording` (migration 7) so "go through my call" finds the right one. Upload-only — you bring an existing recording from your phone, Zoom, Meet, etc. Deliberately not live call-recording: capturing a call as it happens needs a calling-platform integration (Twilio/Zoom/Meet bots) and raises real multi-party consent issues that vary by state and country, so that's out of scope here.
+- [x] **Uploads ask before acting** (host) — a new file used to be summarized unprompted. The upload notice now tells the model to offer the choice instead: go through it, or research what it's about — one short spoken question, and it does only the branch you pick (`recording_insights`/`summarize`, or `deep_research` on the subject). The rule lives in the prompt and the injected message, so it costs no new tool and applies to every upload type.
 
 ---
 
@@ -84,14 +85,18 @@ A flat function list is fine at ten tools; at a hundred it overflows the model's
 
 ---
 
-## Phase 6 — Elicitation as dialogue ⏳
+## Phase 6 — Elicitation as dialogue 🚧
 
 MCP's elicitation spec lets a server pause a call to ask the host for missing information. Rendered as natural spoken back-and-forth, this is Fraise's most conversational moat — the assistant asks a follow-up out loud and resumes the tool once you answer.
 
-- [ ] **Elicitation → spoken question** — a server requesting a parameter makes Fraise ask for it aloud, then resumes the same call with the answer.
-- [ ] **Multi-turn slot filling** — hold partial tool arguments across turns ("book a meeting" → "with who?" → "when?") instead of forcing everything into one utterance.
-- [ ] **Generalized confirmation** — lift the calendar's confirm-before-destructive pattern into a host capability any server can opt into via metadata, not per-server code.
+- [x] **Every server speaks the whole protocol** (`mcp_manager.py`) — builtin skills used to be plain in-process function calls, which meant anything the spec adds *on top* of a call, elicitation included, was unreachable for them. They now run over an in-memory MCP transport with a real `ClientSession`, so a skill behaves identically whether it lives in this repo or across a socket, and the host declares the elicitation capability to all of them.
+- [x] **Elicitation → spoken question** (`host/elicitation.py`) — a server that stops mid-call to ask parks the *suspended coroutine* here; the host hands the model a `needs_input` reply carrying the question and its schema, the model asks it out loud in its own words, and `provide_requested_input` feeds the answer back into that same paused call. The tool never restarts, so everything it had already worked out survives the question. The tool timeout applies only while a tool is working, never while a person is being asked.
+- [x] **Answer by voice or by hand** — the same question also appears as a card in the app. Answering there sends the typed values back verbatim, so an address or a menu choice can't be garbled by speech, while the model still drives the conversation. Free-text answers are coerced to the requested type (yes/no, numbers, enum matching); an unclear one leaves the question open and tells the model what's still missing instead of guessing.
+- [x] **Multi-turn slot filling** — a server can ask again as many times as it needs; each question is a fresh round trip through the same paused call. `send_email` uses two: the recipient, then the confirmation.
+- [x] **Generalized confirmation** (`servers/interaction.py`) — `ask()` and `confirm()` are two lines any server can call, replacing the calendar's bespoke `confirmed=True` second-call trick. Confirmation is now a property of the protocol, not per-server code, and a host without elicitation degrades to "not confirmed" rather than failing.
+- [x] **Email by voice** (`servers/email.py`) — the first skill built on it, and the reason it matters: dictate an email and it asks who it's for, reads the draft back, and sends only on a clear yes. Wraps the existing SMTP sender, so it needs no new credentials.
 - [ ] **Progress narration** (carried from Phase 3) — long-running calls speak MCP progress events so silence never reads as a hang.
+- [ ] **URL-mode elicitation** — the spec's out-of-band path (credentials, OAuth) is declined for now; folding it in would replace calendar's bespoke `auth_redirect` action with the standard flow.
 
 ---
 
@@ -167,7 +172,7 @@ Planned integrations, added as the need arises rather than up front:
 - [ ] **Slack** — read/post messages, summarize channels by voice.
 - [ ] **GitHub / Jira / Linear** — issues, PRs, and status by voice.
 - [ ] **Notion / Google Docs** — read and append to notes.
-- [ ] **Gmail — compose & send by voice** — mirrors the Calendar OAuth pattern (`google-auth-oauthlib` + `googleapiclient`, file-based token) with Gmail's send scope. Reuses `daily.py`'s existing `_lane_email` drafting logic — today it only proposes text via the `email` lane, it never sends — and layers in the calendar's confirm-before-destructive pattern: Fraise drafts and reads the email back, and only sends once you explicitly say "send it." Never fires on the first ask, so a misheard recipient or garbled dictation never goes out unconfirmed. Also covers triage/reading replies once send is in place.
+- [ ] **Gmail — compose & send by voice** — SMTP sending now ships as the `email` server (Phase 6), which drafts, asks who it's for, reads the message back, and sends only on a clear yes. Gmail proper would mirror the Calendar OAuth pattern (`google-auth-oauthlib` + `googleapiclient`, file-based token) with the send scope, which buys threading and triage — reading and replying to mail, not just sending it — and would let `daily.py`'s `email` lane hand its drafts straight to a real outbox.
 - [ ] **Zapier / Make** — reach thousands of long-tail apps through one MCP bridge.
 
 ---

@@ -13,11 +13,23 @@ A voice-first AI assistant you talk to out loud. Say what you need — a calenda
 - Dictate an email and send it — Fraise drafts the subject/body from what you said, you confirm the recipient, and it sends over SMTP (see Getting started).
 - Multi-agent research: ask a question, a team of agents searches different sources in parallel and writes up a doc or deck.
 - On-device document Q&A — upload a PDF/txt/md and ask about it; nothing leaves your machine.
-- Persistent memory across a session, and spoken confirmation before anything destructive.
+- Call recording insights — drop in a recording from your phone, Zoom, or Meet and it's transcribed with speakers separated, then written up as a debrief: what happened, what was decided, who committed to what, and what's still open. The debrief lands on screen and Fraise speaks the headline. Upload-only, and deliberately so: recording a call as it happens needs a calling-platform bot and raises multi-party consent questions that differ by state and country.
+- Uploads ask first. A new file doesn't get acted on unsolicited — Fraise asks whether you want her to go through it or research what it's about, and does only the one you pick.
+- **Fraise asks back.** A skill that's missing something stops mid-call and asks for it — Fraise puts the question to you out loud, in her own words, and picks the same call up where it left off once you answer. Nothing restarts, so a skill can ask twice ("who's it going to?" … "send it?") and still be one uninterrupted job. This is MCP's elicitation spec, so it works for any server you connect, not just the ones in this repo. Every question also appears as a card in the app: answer by voice, or type it if an address is easier to get right by hand.
+- Send an email by voice — say what you want it to say and Fraise asks who it's for, reads the draft back, and sends only once you say yes (see Getting started for SMTP setup).
+- Persistent memory across a session, and confirmation before anything destructive.
+
+## How asking back works
+
+Every skill — including the ones in this repo — talks to the host over a real MCP session, so a server can pause its own tool call and ask the host for what it's missing. The host doesn't answer for you. It parks the suspended call, hands the model the question and its schema, and the model asks it aloud; your reply goes back into that same paused call through one host-owned tool. Because the call is suspended rather than restarted, the work it had already done survives the question, and a server can ask as many times as it needs.
+
+Writing one is two lines — `await ask(ctx, "Who should this go to?", about="Recipient")` or `await confirm(ctx, "Send it?")` — and the host handles the speaking, the on-screen card, and the type coercion. See `backend/app/servers/email.py`.
 
 ## How document search works
 
 Upload triggers **late chunking**: the whole document is embedded first, then split, so each chunk's vector keeps the context of the passage around it. A question runs dense (vector) and keyword (BM25) search in parallel, fuses the results, and a cross-encoder reranks the top candidates before they reach the voice model. All local — no PyTorch, no embedding API.
+
+An audio upload joins the same pipeline one step earlier: it goes to Deepgram's pre-recorded API first (the key the voice loop already uses — no second provider), comes back diarized into speaker-labelled lines, and is stored as a document from there on. So a recording is searchable by the same `ask` as everything else; `recording_insights` is the extra step on top, running the transcript through the same LLM-synthesis pattern `deep_research` uses to produce the written debrief.
 
 ## Tech stack
 
@@ -34,10 +46,10 @@ Prerequisites: Python 3.11+, Node 18+, a Deepgram API key.
 ```bash
 # .env at the repo root: DEEPGRAM_API_KEY, GROQ_API_KEY, TAVILY_API_KEY
 #
-# Optional, to send emails dictated in Dictation mode — a Gmail app password
-# works (myaccount.google.com/apppasswords), or any SMTP provider:
+# Optional, to send email — by voice, or from Dictation mode. A Gmail app
+# password works (myaccount.google.com/apppasswords), or any SMTP provider:
 #   SMTP_USER, SMTP_PASSWORD, and optionally SMTP_HOST/SMTP_PORT/SMTP_FROM.
-# Without these, dictated emails still draft — sending returns a clear error.
+# Without these, emails still draft — sending returns a clear error.
 
 cd backend
 python -m venv .venv && source .venv/bin/activate
@@ -57,7 +69,7 @@ Open the frontend, allow microphone access, and start talking.
 backend/
   app/
     main.py            # FastAPI app: WebSocket, upload, dictate, research routes
-    host/               # voice session + MCP tool router
+    host/               # voice session, MCP tool router, elicitation
     servers/            # one folder/file per MCP skill
   mcp_servers.json      # one entry per skill; edit this to add tools
 frontend/
@@ -82,7 +94,7 @@ Write an MCP server (see `backend/app/servers/calculator.py`), add one entry to 
 | `GET` | `/dictations/{id}?sid=<id>` | Fetch one dictation — raw text, polished text, email fields. |
 | `POST` | `/dictations/{id}/polish?sid=<id>` | Re-run the LLM cleanup/email-detection pass. |
 | `POST` | `/dictations/{id}/send?sid=<id>` | Send a dictated email over SMTP. |
-| `POST` | `/upload?sid=<id>` | Add a document. |
+| `POST` | `/upload?sid=<id>` | Add a document (`.txt`/`.md`/`.pdf`) or a call recording (audio — transcribed on the way in). |
 | `POST` | `/dictate?sid=<id>` | Segment a day's dictation into tasks. |
 | `GET` | `/days?sid=<id>` | List past day runs. |
 | `GET` | `/days/{id}?sid=<id>` | Reopen a past day run — full task results. |
