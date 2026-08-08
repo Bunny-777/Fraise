@@ -6,15 +6,15 @@ import re
 import time
 from datetime import datetime, timezone
 
-from app.host import bus
+from app.host import agent_loop, bus
 from app.servers.memory import store as memory_store
-from app.servers.research import llm, search
+from app.servers.research import llm
 from app.storage import db
 
 logger = logging.getLogger(__name__)
 
-_LANE_LIMIT = 3
-_TASK_BUDGET = 55
+_LANE_LIMIT = 2
+_TASK_BUDGET = 420
 
 _CHUNK_CHARS = 4000
 _MAX_TASKS_PER_CHUNK = 16
@@ -22,34 +22,54 @@ _MAX_TASKS_TOTAL = 48
 _DETAIL_MAX_CHARS = 800
 _SEGMENT_MAX_TOKENS = 4096
 
-LANES = ("research", "remember", "reminder", "calendar", "email", "note", "answer")
-
 _running: set[asyncio.Task] = set()
+
+# Only a display glyph — what a task actually needed is decided by the model at
+# run time, not by sorting it into a lane up front.
+_LANE_BY_TOOL = {
+    "remember": "remember",
+    "recall": "remember",
+    "forget": "remember",
+    "deep_research": "research",
+    "get_weather": "answer",
+    "switch_assistant": "note",
+}
+_LANE_BY_PREFIX = (
+    ("tavily", "research"),
+    ("search", "research"),
+    ("send_email", "email"),
+    ("ask", "note"),
+    ("summarize", "note"),
+    ("recording", "note"),
+    ("list_", "note"),
+    ("calculate", "answer"),
+    ("read_", "note"),
+    ("write_", "note"),
+)
+
+def _lane_for(tools: list[str]) -> str:
+    for tool in tools:
+        if tool in _LANE_BY_TOOL:
+            return _LANE_BY_TOOL[tool]
+        for prefix, lane in _LANE_BY_PREFIX:
+            if tool.startswith(prefix):
+                return lane
+    return "answer" if not tools else "note"
 
 _SEGMENT_SYSTEM = (
     "You turn a spoken brain-dump of someone's day into a list of separate, atomic "
-    "tasks, and sort each into the one agent that should handle it. You may be shown "
-    "only one part of a longer dictation — segment just what's given here; don't "
-    "invent or assume content from parts you can't see.\n\n"
+    "tasks. You may be shown only one part of a longer dictation — segment just "
+    "what's given here; don't invent or assume content from parts you can't see.\n\n"
     "Return JSON: {\"tasks\": [...]}. Each task is:\n"
     '  "title": an imperative phrase, max 8 words, naming the one thing to do.\n'
-    '  "lane": exactly one of: research, remember, reminder, calendar, email, note, answer.\n'
-    '  "detail": the specifics the handling agent needs — the search query, the fact '
-    "to store, the message to draft, the event and time, etc. Keep the user's own "
-    "words where they matter (names, times, amounts).\n\n"
-    "Lane meanings:\n"
-    "- research: needs looking up on the web — find options, compare things, gather "
-    "information, prices, reviews, news.\n"
-    "- remember: a durable fact about the user or their preferences to store.\n"
-    "- reminder: a time-based nudge to resurface later (\"remind me to…\").\n"
-    "- calendar: a specific appointment or event to schedule at a time/date.\n"
-    "- email: a message to write or send to someone.\n"
-    "- note: a to-do or note that fits no other lane.\n"
-    "- answer: a direct question the assistant can just answer.\n\n"
+    '  "detail": everything needed to carry it out on its own, without the rest of '
+    "the dictation for context — the subject, the person, the time, the amount. Keep "
+    "the user's own words where they matter.\n\n"
     "Rules:\n"
     "- SPLIT compound speech into separate tasks. \"Email Sam and book a table\" is two.\n"
     "- Do not invent tasks the person did not say. Do not merge unrelated ones.\n"
-    "- Every task needs a lane; when unsure between two, pick the more actionable one.\n"
+    "- Do not decide how a task should be carried out — that is worked out later. "
+    "Just capture what was asked for, completely.\n"
     "- Keep the tasks in the order they were spoken."
 )
 
@@ -134,12 +154,9 @@ async def _segment_chunk(text: str, tz_offset_min: int, context: str) -> list[di
     for t in raw_tasks[:_MAX_TASKS_PER_CHUNK]:
         title = llm.strip_markdown(str(t.get("title") or "")).strip()[:80]
         detail = str(t.get("detail") or "").strip()[:_DETAIL_MAX_CHARS]
-        lane = str(t.get("lane") or "note").strip().lower()
-        if lane not in LANES:
-            lane = "note"
         if not title and not detail:
             continue
-        tasks.append({"title": title or detail[:60], "lane": lane, "detail": detail or title})
+        tasks.append({"title": title or detail[:60], "lane": "note", "detail": detail or title})
     return tasks or [_fallback_task(text)]
 
 async def _segment(text: str, tz_offset_min: int, session_id: str) -> list[dict]:
@@ -164,43 +181,22 @@ async def _segment(text: str, tz_offset_min: int, session_id: str) -> list[dict]
 def _fallback_task(text: str) -> dict:
     return {"title": text.strip()[:60] or "Your note", "lane": "note", "detail": text.strip()}
 
-_RESEARCH_SYSTEM = (
-    "You are a research agent. From these search results, answer the request in "
-    "2-3 tight, specific sentences — concrete names, numbers, and picks, never "
-    "invented. Plain text only: no markdown, no URLs."
-)
+_TOOL_NOTE = {
+    "remember": "Saving it to memory…",
+    "deep_research": "Putting agents on it…",
+    "get_weather": "Checking the weather…",
+    "calculate": "Working out the numbers…",
+}
 
-async def _lane_research(detail: str) -> tuple[str, str, str, list]:
-    results = await asyncio.wait_for(search.search(detail, [], max_results=5), _TASK_BUDGET)
-    if not results:
-        return "done", "Nothing solid came back.", "I couldn't find much on that one.", []
-    corpus = "\n\n".join(f"[{i+1}] {r['title']}\n{r['content']}" for i, r in enumerate(results))
-    raw = await asyncio.wait_for(
-        llm.complete(_RESEARCH_SYSTEM, f"Request: {detail}\n\nResults:\n{corpus}"), _TASK_BUDGET
-    )
-    summary = llm.strip_markdown(raw) or "Found some leads — take a look at the sources."
-    sources = [{"title": r["title"], "url": r["url"]} for r in results[:3] if r.get("title")]
-    return "done", f"Read {len(results)} sources.", summary, sources
-
-async def _lane_answer(detail: str) -> tuple[str, str, str, list]:
-    system = (
-        "Answer the question directly in 1-3 sentences. Plain text, no markdown. "
-        "If it needs live or personal data you don't have, say so briefly."
-    )
-    raw = await asyncio.wait_for(llm.complete(system, detail), _TASK_BUDGET)
-    return "done", "Answered.", llm.strip_markdown(raw) or "Done.", []
-
-async def _lane_email(detail: str) -> tuple[str, str, str, list]:
-    system = (
-        "Draft a short, warm, professional email for the request. Return plain text "
-        "as:\nSubject: <line>\n\n<2-4 sentence body>\nNo markdown, no placeholders "
-        "like [Name] unless the name is genuinely unknown."
-    )
-    raw = await asyncio.wait_for(llm.complete(system, detail), _TASK_BUDGET)
-    return "proposed", "Draft ready to review.", llm.strip_markdown(raw) or detail, []
+def _note_for(tool: str) -> str:
+    if tool in _TOOL_NOTE:
+        return _TOOL_NOTE[tool]
+    if tool.startswith(("tavily", "search")):
+        return "Searching the web…"
+    return f"Using {tool.replace('_', ' ')}…"
 
 async def _run_task(task: dict, day_id: str, session_id: str) -> dict:
-    tid, lane, detail = task["id"], task["lane"], task["detail"]
+    tid, detail = task["id"], task["detail"]
     started = time.monotonic()
 
     def emit(status: str, note: str, **extra) -> None:
@@ -209,43 +205,35 @@ async def _run_task(task: dict, day_id: str, session_id: str) -> dict:
             "status": status, "note": note, **extra,
         })
 
-    emit("running", {
-        "research": "Searching the web…",
-        "remember": "Saving to memory…",
-        "email": "Drafting the message…",
-        "answer": "Working it out…",
-    }.get(lane, "Handling it…"))
+    emit("running", "Working out what this needs…")
 
     try:
-        if lane == "research":
-            status, note, result, sources = await _lane_research(detail)
-        elif lane == "answer":
-            status, note, result, sources = await _lane_answer(detail)
-        elif lane == "email":
-            status, note, result, sources = await _lane_email(detail)
-        elif lane == "remember":
-            await asyncio.to_thread(memory_store.remember, session_id, detail)
-            status, note, result, sources = "done", "Saved.", "I'll remember that.", []
-        elif lane == "reminder":
-            status, note, result, sources = (
-                "proposed", "Reminder set aside.",
-                f"I'll nudge you: {detail}", [])
-        elif lane == "calendar":
-            status, note, result, sources = (
-                "proposed", "Ready to schedule.",
-                f"I can add this once your calendar is connected: {detail}", [])
-        else:
-            await asyncio.to_thread(memory_store.remember, session_id, f"To do: {detail}")
-            status, note, result, sources = "done", "Noted.", detail, []
-
+        objective = f"{task['title']}\n\n{detail}" if task.get("title") else detail
+        outcome = await asyncio.wait_for(
+            agent_loop.run(
+                objective, session_id, on_step=lambda tool: emit("running", _note_for(tool))
+            ),
+            _TASK_BUDGET,
+        )
+        used = outcome["tools"]
+        result = outcome["text"] or "Handled."
+        lane = _lane_for(used)
+        note = (
+            "Handled with " + ", ".join(dict.fromkeys(t.replace("_", " ") for t in used)) + "."
+            if used else "Answered."
+        )
         elapsed = round(time.monotonic() - started, 1)
-        emit(status, note, result=result, sources=sources, elapsed=elapsed)
-        return {**task, "status": status, "note": note, "result": result, "sources": sources, "elapsed": elapsed}
+        emit("done", note, result=result, sources=[], elapsed=elapsed, lane=lane)
+        return {
+            **task, "lane": lane, "status": "done", "note": note,
+            "result": result, "sources": [], "elapsed": elapsed, "tools": used,
+        }
 
     except Exception as exc:
-        logger.warning("day task %s (%s) failed: %s", tid, lane, exc)
-        emit("failed", "Couldn't finish this one.", error=str(exc)[:160])
-        return {**task, "status": "failed", "error": str(exc)[:160]}
+        logger.warning("day task %s failed: %r", tid, exc)
+        reason = llm.friendly_error(exc)
+        emit("failed", "Couldn't finish this one.", error=reason)
+        return {**task, "status": "failed", "error": reason}
 
 async def _run(day_id: str, text: str, session_id: str, tz_offset_min: int) -> None:
     state: dict[str, dict] = {}

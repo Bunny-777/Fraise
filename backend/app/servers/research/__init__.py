@@ -27,9 +27,17 @@ mcp = FastMCP("research", instructions=(
     "write-up appears on their screen by itself when the agents finish."
 ))
 
-MIN_AGENTS = 2
-MAX_AGENTS = 4
-_AGENT_BUDGET = 60
+MIN_AGENTS = 1
+MAX_AGENTS = 6
+# Long enough to outlast the LLM client's own rate-limit backoff — a shorter
+# budget cancels a retry that was about to succeed.
+_AGENT_BUDGET = 200
+# The provider's limit is per minute across the whole org, so agents queue for the
+# model even though their searches still run in parallel.
+_MODEL_LANES = 2
+_model_lane = asyncio.Semaphore(_MODEL_LANES)
+
+_friendly = llm.friendly_error
 
 _running: set[asyncio.Task] = set()
 
@@ -39,7 +47,12 @@ def _today_line() -> str:
 _PLANNER_SYSTEM = (
     "You plan a parallel research team. Given one question, design the agents that "
     "should go and look — each on a genuinely different angle, all at the same time.\n\n"
-    f"Return JSON: {{\"agents\": [...]}} with {MIN_AGENTS} to {MAX_AGENTS} agents. Each agent is:\n"
+    f"Return JSON: {{\"agents\": [...]}} with between {MIN_AGENTS} and {MAX_AGENTS} "
+    "agents. Choose the number the question actually deserves rather than a habit: "
+    "one agent for something narrow with a single obvious source, five or six when "
+    "the question genuinely has that many distinct angles worth covering at once. "
+    "Each extra agent must earn its place with an angle no other agent covers.\n"
+    "Each agent is:\n"
     '  "label": 1-2 words naming what this agent IS — either the site it searches, or '
     "the angle it covers.\n"
     '  "query": the search query THIS agent runs. Specific to its angle, and different '
@@ -200,13 +213,14 @@ async def _run_agent(spec: dict, run_id: str, session_id: str) -> dict:
         step("thinking", "Pulling out what actually answers the question",
              found=len(results), titles=titles)
 
-        raw = await asyncio.wait_for(
-            llm.complete(
-                _agent_system(label, spec["angle"]),
-                f"Query: {spec['query']}\n\nResults:\n{corpus}",
-            ),
-            _AGENT_BUDGET,
-        )
+        async with _model_lane:
+            raw = await asyncio.wait_for(
+                llm.complete(
+                    _agent_system(label, spec["angle"]),
+                    f"Query: {spec['query']}\n\nResults:\n{corpus}",
+                ),
+                _AGENT_BUDGET,
+            )
         findings = "\n".join(line for line in llm.strip_markdown(raw).splitlines() if line)
         elapsed = round(time.monotonic() - started, 1)
         step("done", f"Done in {elapsed}s",
@@ -215,8 +229,9 @@ async def _run_agent(spec: dict, run_id: str, session_id: str) -> dict:
 
     except Exception as exc:
         logger.warning("agent %s failed: %s", name, exc)
-        step("failed", "Couldn't finish", error=str(exc)[:160])
-        return {"agent": name, "label": label, "findings": "", "sources": [], "error": str(exc)}
+        reason = _friendly(exc)
+        step("failed", "Couldn't finish", error=reason)
+        return {"agent": name, "label": label, "findings": "", "sources": [], "error": reason}
 
 _SYNTH_SYSTEM = (
     "You merge findings from several research agents into one artifact.\n"
@@ -287,7 +302,7 @@ async def _run(run_id: str, query: str, hint: str, fmt: str, session_id: str) ->
     except Exception as exc:
         logger.exception("research run %s crashed", run_id)
         bus.publish(session_id, {
-            "type": "run", "run_id": run_id, "status": "failed", "error": str(exc)[:160],
+            "type": "run", "run_id": run_id, "status": "failed", "error": _friendly(exc),
         })
 
 async def _run_impl(run_id: str, query: str, hint: str, fmt: str, session_id: str) -> None:
@@ -327,7 +342,7 @@ async def _run_impl(run_id: str, query: str, hint: str, fmt: str, session_id: st
     except llm.LLMUnavailable as exc:
         logger.warning("synthesis failed: %s", exc)
         bus.publish(session_id, {
-            "type": "run", "run_id": run_id, "status": "failed", "error": str(exc)[:160],
+            "type": "run", "run_id": run_id, "status": "failed", "error": _friendly(exc),
         })
         return
 
