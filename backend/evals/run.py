@@ -77,6 +77,47 @@ def contract_suite(report: Report) -> None:
         report.line(has, f"{name}: {'declares instructions' if has else 'NO INSTRUCTIONS'}")
         report.check(has, f"contract/{name}", "server has no instructions")
 
+def error_suite(report: Report) -> None:
+    report.section("Provider errors never reach the user raw")
+    from app.servers import research
+    from app.servers.research import llm as research_llm
+
+    raw = 'Groq 429: {"error":{"message":"Rate limit reached for model `x` in organization `org_01k5h`'
+    friendly = research._friendly(research_llm.LLMUnavailable(raw))
+    for leak in ("Groq", "org_", "429", "{"):
+        ok = leak not in friendly
+        report.line(ok, f"no {leak!r} in user-facing text")
+        report.check(ok, f"errors/{leak}", friendly[:80])
+    report.line(bool(friendly), f"reads as: {friendly}")
+
+async def briefing_suite(report: Report) -> None:
+    report.section("Standing context arrives before the first word")
+    from app.host.mcp_manager import BRIEFING_TOOL
+    from app.servers.memory import store as memory_store
+    from app.servers.rag import store as rag_store
+
+    sid = "eval-briefing"
+    await asyncio.to_thread(memory_store.remember, sid, "Prefers window seats on flights.")
+    await asyncio.to_thread(rag_store.add_document, sid, "launch-call.wav", "We ship Friday.", "recording")
+
+    declared = {f["name"] for f in manager.functions()}
+    hidden = not any(n == BRIEFING_TOOL or n.endswith(f"_{BRIEFING_TOOL}") for n in declared)
+    report.line(hidden, "briefing is hidden from the model's tool list")
+    report.check(hidden, "briefing/hidden", "briefing leaked into routable tools")
+
+    briefings = await manager.briefings(sid)
+    for server in ("memory", "rag"):
+        ok = bool(briefings.get(server))
+        report.line(ok, f"{server} contributes a briefing")
+        report.check(ok, f"briefing/{server}", "no briefing returned")
+
+    settings = await voice_agent._build_settings(session_id=sid, user_name="Eval")
+    prompt = settings["agent"]["think"]["prompt"]
+    for fragment, label in (("window seats", "known preference"), ("launch-call", "uploaded recording")):
+        ok = fragment in prompt
+        report.line(ok, f"prompt already knows the {label}")
+        report.check(ok, f"briefing/prompt-{label}", f"{fragment!r} missing from prompt")
+
 async def prompt_suite(report: Report) -> None:
     report.section("Composed prompt carries every contract")
     settings = await voice_agent._build_settings(session_id="", user_name="Eval")
@@ -158,6 +199,7 @@ async def main() -> int:
     report = Report()
     speech_suite(report)
     debrief_suite(report)
+    error_suite(report)
 
     calculator.streamable_http_app()
     async with calculator.session_manager.run():
@@ -165,6 +207,7 @@ async def main() -> int:
         try:
             contract_suite(report)
             await prompt_suite(report)
+            await briefing_suite(report)
             if args.routing:
                 await routing_suite(report)
         finally:
