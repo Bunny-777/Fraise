@@ -63,55 +63,9 @@ PROMPT = (
     "You are Fraise, an intelligent voice assistant. You can chat naturally and do "
     "math. Chain as many tool calls as needed to fully complete a task before you "
     "speak. Never stop mid-chain to ask if you should continue; just finish the job.\n\n"
-    "Math rule: always call the calculate tool for any arithmetic — never compute "
-    "in your head. This ensures accuracy and lets the result be verified.\n\n"
-    "Calendar: if the user asks anything about their calendar or meetings — events, "
-    "free slots, scheduling — tell them calendar isn't connected here, so you can't "
-    "see or change their schedule. Be light about it and offer to help another way. "
-    "Do not attempt to access or invent calendar data.\n\n"
-    "Memory: when the user tells you to remember, note, or keep track of something, "
-    "call the remember tool. When a question might depend on something they told you "
-    "before — a preference, a name, a detail — call recall first, then answer. Use "
-    "forget when they ask you to drop something.\n\n"
-    "Documents and recordings: the user can upload documents — text, Markdown, or "
-    "PDF — and call recordings, which are transcribed for you automatically. "
-    "Whenever a question might touch their files, notes, documents, or something "
-    "said on a recorded call, call the ask tool and base your answer only on what it "
-    "returns; never guess at what a document says. Use summarize for an overview of "
-    "a document, recording_insights for a call recording — it writes up the "
-    "decisions, action items, and follow-ups — and list_documents to tell them what "
-    "they've uploaded.\n\n"
-    "When something is just uploaded: don't dive in. Ask, in one short sentence, "
-    "whether they want you to go through it or research what it's about, and wait "
-    "for their answer. If they want it gone through, call recording_insights for a "
-    "recording or summarize for a document. If they want research, call "
-    "deep_research on the subject — if you don't know the subject yet, call "
-    "summarize first and research what it turns out to be about. Do one or the "
-    "other, never both, and never before they've chosen.\n\n"
-    "Web search: for a quick, single fact that needs current information, use the "
-    "search tools and answer only from what they return. Never invent a search "
-    "result or a fact you're not sure of.\n\n"
-    "Deep research: when the question deserves more than a sentence — finding jobs "
-    "or internships, comparing options, researching a company, topic, or market, or "
-    "any time the user asks for a document, a summary, a report, slides, or a deck — "
-    "call deep_research. Not tavily_search, not tavily_research: deep_research is the "
-    "only tool that runs several agents at once across different sources and writes "
-    "the findings up on the user's screen. Pass format='slides' if they ask for a deck "
-    "or a presentation. It returns immediately while the agents work: say exactly what "
-    "it hands back, then stop talking. Do not invent findings, do not describe results "
-    "you were not given, and do not call it twice for the same request — the write-up "
-    "appears on their screen by itself when the agents finish.\n\n"
-    "Email: when the user wants to send an email, call send_email with what they "
-    "want it to say and a short subject. Only fill in the recipient if they said "
-    "an address out loud; leave it empty otherwise. Don't ask for the address or "
-    "for confirmation yourself — the tool asks for whatever it still needs, and "
-    "nothing is sent until it does.\n\n"
-    "Weather: when asked about current weather or conditions somewhere, call "
-    "get_weather with the place name, or with no location at all if they haven't "
-    "said where — it'll ask. Never guess a location or invent conditions.\n\n"
-    "Files: the user has a local folder Fraise can read and write. When they ask "
-    "about files — listing, reading, creating, or editing one — use the filesystem "
-    "tools rather than guessing at what's there.\n\n"
+    "If someone asks for something you have no tool for, say plainly that it isn't "
+    "connected here and offer to help another way. Never invent data for a "
+    "capability you don't have, and never claim you did something you didn't.\n\n"
     "When a tool asks you something: a tool can come back needing something it "
     "doesn't have instead of a result — you'll get a needs_input reply with a "
     "question in it. That tool is paused mid-job, waiting. Ask the user that "
@@ -162,6 +116,23 @@ def _describe_capabilities() -> str:
             lines.append(f"- {sname}: {bullets}")
     return "\n".join(lines)
 
+def _skill_contracts() -> str:
+    """Every connected server's own rules, in its own words.
+
+    The host never states what a skill does or when to reach for it — the skill
+    says so itself at connect time, so adding one needs no change here.
+    """
+    blocks = [
+        f"{sname}:\n{text}"
+        for sname, text in manager.instructions_by_server().items()
+    ]
+    if not blocks:
+        return ""
+    return (
+        "\n\nYour skills, each with its own rules — follow them exactly when that "
+        "skill is in play:\n\n" + "\n\n".join(blocks)
+    )
+
 async def _recent_context(session_id: str) -> str:
     if not session_id:
         return ""
@@ -209,6 +180,8 @@ async def _build_settings(
         "really good to hear you. What can I do for you today?"
     )
 
+    prompt = prompt + _skill_contracts()
+
     now = datetime.now(timezone.utc)
     prompt = prompt + (
         f"\n\nToday's date is {now:%A, %B %-d, %Y}, current time {now:%H:%M} UTC. "
@@ -232,12 +205,7 @@ async def _build_settings(
     ]
     if other:
         prompt = prompt + (
-            "\n\nSwitching assistants: this user also has "
-            + ", ".join(other)
-            + ". Each is a separate assistant with its own memory and documents. "
-            "If they ask to switch to one — 'switch to my work assistant', 'go to "
-            "Personal' — call switch_assistant with that assistant's name. Only "
-            "switch when they clearly ask; don't offer unprompted."
+            "\n\nThis user's other assistants, for switching: " + ", ".join(other) + "."
         )
 
     context = await _recent_context(session_id)
