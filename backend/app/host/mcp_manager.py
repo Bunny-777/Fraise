@@ -24,6 +24,11 @@ _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 _INJECTED_PARAMS = ("session_id",)
 
+# A server may expose this to hand the host a standing briefing about the user —
+# what it already knows, before anyone asks. The model never sees it as a tool;
+# the host folds what it returns into the prompt at connect time.
+BRIEFING_TOOL = "briefing"
+
 class ToolFailed(RuntimeError):
     """A server ran the tool and reported it as failed."""
 
@@ -182,6 +187,8 @@ class MCPManager:
         self._route.clear()
         for sname, s in self._servers.items():
             for t in s["tools"]:
+                if t.name == BRIEFING_TOOL:
+                    continue
                 public = t.name if counts[t.name] == 1 else f"{sname}_{t.name}"
                 public = _UNSAFE.sub("_", public)[:64]
                 self._route[public] = (sname, t.name)
@@ -243,6 +250,28 @@ class MCPManager:
         if result.isError:
             raise ToolFailed(text or "the tool failed without saying why")
         return _flatten_structured(getattr(result, "structuredContent", None)) or text
+
+    async def briefings(self, session_id: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for name, server in self._servers.items():
+            if BRIEFING_TOOL not in server["by_name"]:
+                continue
+            try:
+                result = await server["session"].call_tool(
+                    BRIEFING_TOOL, {"session_id": session_id}
+                )
+            except Exception:
+                logger.warning("briefing from %r failed", name, exc_info=True)
+                continue
+            if result.isError:
+                continue
+            text = (
+                _flatten_structured(getattr(result, "structuredContent", None))
+                or "".join(getattr(b, "text", "") for b in (result.content or []))
+            ).strip()
+            if text:
+                out[name] = text
+        return out
 
     async def aclose(self) -> None:
         await self._stack.aclose()

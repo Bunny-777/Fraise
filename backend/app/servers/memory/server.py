@@ -10,6 +10,20 @@ mcp = FastMCP("memory", streamable_http_path="/", instructions=(
     "they ask you to drop something."
 ))
 
+@mcp.tool(description="Host-only: what this skill already knows about the user.")
+async def briefing(session_id: str = "") -> str:
+    if not session_id:
+        return ""
+    facts = await anyio.to_thread.run_sync(store.recall, session_id, "", 12)
+    if not facts:
+        return ""
+    return (
+        "What you already know about them:\n"
+        + "\n".join(f"- {f}" for f in facts)
+        + "\nUse these naturally without being asked and without calling recall for "
+        "them. Only call recall for something not listed here."
+    )
+
 @mcp.tool(description=(
     "Save something the user wants remembered for later.\n\n"
     "content: the fact or preference to store, in plain language. Call this whenever "

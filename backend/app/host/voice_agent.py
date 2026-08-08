@@ -12,7 +12,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.host import elicitation
 from app.host.mcp_manager import manager
-from app.servers.memory import store as memory_store
+from app.servers.memory import consolidate, store as memory_store
 
 _ACTION_TIMEOUT = 90
 
@@ -181,6 +181,15 @@ async def _build_settings(
     )
 
     prompt = prompt + _skill_contracts()
+
+    # Context arrives before the first word, rather than waiting for the model to
+    # think of asking for it.
+    briefings = await manager.briefings(session_id) if session_id else {}
+    if briefings:
+        prompt = prompt + (
+            "\n\nWhat you already know, before they say anything:\n\n"
+            + "\n\n".join(briefings.values())
+        )
 
     now = datetime.now(timezone.utc)
     prompt = prompt + (
@@ -523,6 +532,7 @@ async def bridge(
 
         async def dg_to_browser() -> None:
             step_count = 0
+            turn_count = 0
             async for message in dg:
                 if isinstance(message, (bytes, bytearray)):
                     await browser.send_bytes(message)
@@ -541,6 +551,8 @@ async def bridge(
                     role, content = event.get("role"), event.get("content")
                     if role in ("user", "assistant") and content:
                         await anyio.to_thread.run_sync(memory_store.log_turn, session_id, role, content)
+                        turn_count += 1
+                        consolidate.maybe_consolidate(session_id, turn_count)
 
                 if event_type == "FunctionCallRequest":
                     if step_count >= MAX_TOOL_STEPS:

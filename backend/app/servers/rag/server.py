@@ -90,6 +90,26 @@ async def recording_insights(filename: str = "", session_id: str = "") -> str:
                 "or follow-ups aloud only if they ask for them.",
     })
 
+@mcp.tool(description="Host-only: what this skill already knows about the user.")
+async def briefing(session_id: str = "") -> str:
+    if not session_id:
+        return ""
+    uploads = await anyio.to_thread.run_sync(store.list_documents, session_id)
+    if not uploads:
+        return ""
+    docs = [Path(u["filename"]).stem for u in uploads if u["kind"] != "recording"][:6]
+    recordings = [Path(u["filename"]).stem for u in uploads if u["kind"] == "recording"][:6]
+    lines = []
+    if docs:
+        lines.append("Documents they've uploaded: " + ", ".join(docs) + ".")
+    if recordings:
+        lines.append("Call recordings they've uploaded: " + ", ".join(recordings) + ".")
+    lines.append(
+        "You already know these exist — don't ask what they've uploaded, and call ask "
+        "or summarize when a question touches one."
+    )
+    return " ".join(lines)
+
 @mcp.tool(description="List the documents and call recordings the user has uploaded.")
 async def list_documents(session_id: str = "") -> str:
     if not session_id:
