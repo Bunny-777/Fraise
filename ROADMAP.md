@@ -37,6 +37,7 @@ Connect any number of MCP servers from a config file. Route every call to the ri
 - [x] Tool namespacing — collisions get a server prefix (`slack_search` vs `jira_search`)
 - [x] Voice agent reads from `MCPManager`, not the hardcoded calculator
 - [x] **Multi-tool chaining** — keeps calling tools until the task is done; step cap of 10 per turn guards against runaway loops.
+- [x] **Self-describing skills** — a server states its own conversational contract (when to reach for it, how to speak its results) as MCP `instructions` at initialize, and the host composes the system prompt from whatever is connected. Third-party servers that can't know about Fraise get theirs from an `instructions` key in `mcp_servers.json`, so a capability is still one config entry. This closes the last hole in that invariant: the host prompt used to carry a hand-written paragraph per server, so adding a skill meant editing the host. It's now 504 words of pure voice/protocol behavior, down from 1,069, and disabling a server takes its rules with it instead of leaving a stale apology in the prompt.
 
 ---
 
@@ -81,7 +82,7 @@ A flat function list is fine at ten tools; at a hundred it overflows the model's
 - [ ] **Hierarchical tool selection** — two-stage routing: pick the domain/server first, then the tool, so the LLM never faces the whole flat namespace at once.
 - [ ] **Semantic tool retrieval** — embed tool descriptions at connect time and surface only the top-_k_ relevant tools for a given utterance, instead of sending every declaration every turn.
 - [ ] **Lazy schema exposure** — hand the model a server's full tool schemas only once its domain is in play, keeping the base prompt small.
-- [ ] **Routing eval harness** — a fixed set of `utterance → expected tool` cases so adding a server can't silently regress selection.
+- [x] **Routing eval harness** (`backend/evals/`) — `python -m evals.run` checks, with no API key and no cost, that every connected skill declares a contract, that each one survives into the composed prompt, and that what tools hand back is speakable (no markdown, no bullets, no spoken URLs) — the class of bug that had Fraise reading a résumé aloud as `**bold**`. `--routing` adds live `utterance → expected tool` cases so adding a server can't silently regress selection.
 
 ---
 
