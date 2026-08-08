@@ -84,11 +84,12 @@ class MCPManager:
             len(self._servers), len(self._route),
         )
 
-    def _register(self, name: str, session: ClientSession, tools: list) -> None:
+    def _register(self, name: str, session: ClientSession, tools: list, instructions: str) -> None:
         tools = list(tools)
         self._servers[name] = {
             "session": session,
             "tools": tools,
+            "instructions": instructions,
             "by_name": {t.name: t for t in tools},
             # Voice sessions with a call currently running against this server,
             # so a question the server raises can be routed back to the right one.
@@ -158,10 +159,15 @@ class MCPManager:
                 session = await scoped.enter_async_context(
                     ClientSession(read, write, elicitation_callback=elicit)
                 )
-                await session.initialize()
+
+            # A server states its own conversational contract at initialize. For
+            # third-party servers that can't know about Fraise, the config entry
+            # supplies one instead — so a capability is still one config entry.
+            handshake = await session.initialize()
+            instructions = str(spec.get("instructions") or handshake.instructions or "").strip()
 
             tools = (await session.list_tools()).tools
-            self._register(name, session, tools)
+            self._register(name, session, tools, instructions)
             self._stack.push_async_callback(scoped.pop_all().aclose)
 
         count = len(self._servers[name]["tools"])
@@ -194,6 +200,13 @@ class MCPManager:
                 for public, (sname, tname) in self._route.items()
             ]
         return self._functions_cache
+
+    def instructions_by_server(self) -> dict[str, str]:
+        return {
+            name: server["instructions"]
+            for name, server in self._servers.items()
+            if server["instructions"]
+        }
 
     def functions_by_server(self) -> dict[str, list[dict]]:
         if self._functions_by_server_cache is None:

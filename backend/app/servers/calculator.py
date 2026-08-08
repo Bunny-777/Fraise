@@ -4,7 +4,10 @@ import operator
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
-mcp = FastMCP("calculator", streamable_http_path="/")
+mcp = FastMCP("calculator", streamable_http_path="/", instructions=(
+    "Always call the calculate tool for any arithmetic — never compute in your head. "
+    "This ensures accuracy and lets the result be verified."
+))
 
 class CalcResult(BaseModel):
     expression: str

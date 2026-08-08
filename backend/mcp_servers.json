@@ -39,13 +39,15 @@
     "filesystem": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/ubuntu/Fraise-files"]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/ubuntu/Fraise-files"],
+      "instructions": "The user has a local folder Fraise can read and write. When they ask about files — listing, reading, creating, or editing one — use these tools rather than guessing at what's there."
     },
     "web-search": {
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "tavily-mcp"],
-      "env": { "TAVILY_API_KEY": "${TAVILY_API_KEY}" }
+      "env": { "TAVILY_API_KEY": "${TAVILY_API_KEY}" },
+      "instructions": "For a quick, single fact that needs current information, use these search tools and answer only from what they return. Never invent a search result or a fact you're not sure of. For anything that deserves more than a sentence, prefer deep_research instead."
     }
   }
 }

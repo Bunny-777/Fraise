@@ -1,7 +1,10 @@
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("weather", streamable_http_path="/")
+mcp = FastMCP("weather", streamable_http_path="/", instructions=(
+    "When asked about current weather or conditions somewhere, call get_weather with "
+    "the place name. Never guess a location or invent conditions."
+))
 
 _GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"

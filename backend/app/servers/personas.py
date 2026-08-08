@@ -2,7 +2,12 @@ import json
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("personas", streamable_http_path="/")
+mcp = FastMCP("personas", streamable_http_path="/", instructions=(
+    "This user may keep several assistants, each with its own separate memory and "
+    "documents. If they clearly ask to switch to one — 'switch to my work "
+    "assistant', 'go to Personal' — call switch_assistant with that assistant's "
+    "name. Only switch when they ask; don't offer unprompted."
+))
 
 @mcp.tool(description=(
     "Switch the active voice assistant to the one the user names.\n\n"

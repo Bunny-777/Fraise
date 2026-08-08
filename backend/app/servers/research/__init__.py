@@ -14,7 +14,18 @@ from app.storage import db
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("research")
+mcp = FastMCP("research", instructions=(
+    "When the question deserves more than a sentence — finding jobs or internships, "
+    "comparing options, researching a company, topic, or market, or any time the "
+    "user asks for a document, a summary, a report, slides, or a deck — call "
+    "deep_research. Not a plain web search: deep_research is the only tool that runs "
+    "several agents at once across different sources and writes the findings up on "
+    "the user's screen. Pass format='slides' if they ask for a deck or a "
+    "presentation. It returns immediately while the agents work: say exactly what it "
+    "hands back, then stop talking. Do not invent findings, do not describe results "
+    "you were not given, and do not call it twice for the same request — the "
+    "write-up appears on their screen by itself when the agents finish."
+))
 
 MIN_AGENTS = 2
 MAX_AGENTS = 4

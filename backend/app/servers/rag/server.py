@@ -6,7 +6,22 @@ from mcp.server.fastmcp import FastMCP
 
 from . import insights, store
 
-mcp = FastMCP("rag", streamable_http_path="/")
+mcp = FastMCP("rag", streamable_http_path="/", instructions=(
+    "The user can upload documents — text, Markdown, or PDF — and call recordings, "
+    "which are transcribed automatically. Whenever a question might touch their "
+    "files, notes, documents, or something said on a recorded call, call the ask "
+    "tool and base your answer only on what it returns; never guess at what a "
+    "document says. Use summarize for an overview of a document, recording_insights "
+    "for a call recording — it writes up the decisions, action items, and follow-ups "
+    "— and list_documents to tell them what they've uploaded.\n"
+    "When something is just uploaded, don't dive in. Ask, in one short sentence, "
+    "whether they want you to go through it or research what it's about, and wait "
+    "for their answer. If they want it gone through, call recording_insights for a "
+    "recording or summarize for a document. If they want research, research the "
+    "subject — if you don't know it yet, call summarize first and research what it "
+    "turns out to be about. Do one or the other, never both, and never before they "
+    "have chosen."
+))
 
 @mcp.tool(description=(
     "Answer a question using the user's uploaded documents and call recordings.\n\n"

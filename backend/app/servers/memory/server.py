@@ -3,7 +3,12 @@ from mcp.server.fastmcp import FastMCP
 
 from . import store
 
-mcp = FastMCP("memory", streamable_http_path="/")
+mcp = FastMCP("memory", streamable_http_path="/", instructions=(
+    "When the user tells you to remember, note, or keep track of something, call the "
+    "remember tool. When a question might depend on something they told you before — "
+    "a preference, a name, a detail — call recall first, then answer. Use forget when "
+    "they ask you to drop something."
+))
 
 @mcp.tool(description=(
     "Save something the user wants remembered for later.\n\n"
