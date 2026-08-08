@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { DocCover, Icon, type IconName } from "./icons";
+import { httpBase } from "./useVoiceAgent";
 
 type Suggestion = { icon: IconName; label: string; text: string; accent?: boolean };
 type Doc = { name: string; chunks: number; kind: "document" | "recording" };
@@ -43,10 +45,43 @@ interface BoardProps {
   docs: Doc[];
   uploading: string;
   receded: boolean;
+  sid: string;
 }
 
-export default function Board({ docs, uploading, receded }: BoardProps) {
-  const suggestions = suggestionsFor(docs);
+const ICONS: IconName[] = ["math", "remember", "recall", "web", "doc", "search"];
+
+function useLiveSuggestions(sid: string, docs: Doc[], fallback: Suggestion[]): Suggestion[] {
+  const [live, setLive] = useState<Suggestion[] | null>(null);
+
+  useEffect(() => {
+    if (!sid) return;
+    let cancelled = false;
+    const url = new URL("/suggestions", httpBase());
+    url.searchParams.set("sid", sid);
+    fetch(url)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((rows) => {
+        if (cancelled || !Array.isArray(rows) || rows.length < 2) return;
+        setLive(
+          rows.map((r: { icon?: string; label?: string; text?: string }, i: number) => ({
+            icon: (ICONS.includes(r.icon as IconName) ? r.icon : "search") as IconName,
+            label: r.label || "Try",
+            text: r.text || "",
+            accent: i === 0,
+          })).filter((s: Suggestion) => s.text),
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [sid, docs.length]);
+
+  return live ?? fallback;
+}
+
+export default function Board({ docs, uploading, receded, sid }: BoardProps) {
+  const suggestions = useLiveSuggestions(sid, docs, suggestionsFor(docs));
   const hasDocs = docs.length > 0 || !!uploading;
 
   return (

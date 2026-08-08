@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from app.servers.calendar_auth import router as calendar_auth_router
-from app.host import bus
+from app.host import bus, suggest
 from app.host.mcp_manager import manager
 from app.servers.calculator import mcp
 from app.servers import daily
@@ -108,6 +108,10 @@ async def history(sid: str = Query(...), limit: int = Query(40)) -> dict:
         "turns": [{"role": r, "text": c} for r, c in turns],
         "memories": facts,
     }
+
+@app.get("/suggestions")
+async def suggestions(sid: str = Query(...)) -> list[dict]:
+    return await suggest.for_session(sid)
 
 @app.get("/artifacts")
 async def artifacts(sid: str = Query(...)) -> list[dict]:
@@ -215,9 +219,11 @@ async def upload(sid: str = Query(...), file: UploadFile = ...) -> dict:
         kind, empty = "document", "no readable text in that file"
     if not text:
         raise HTTPException(status_code=400, detail=empty)
-    return await anyio.to_thread.run_sync(
+    added = await anyio.to_thread.run_sync(
         rag_store.add_document, sid, filename, text, kind
     )
+    suggest.invalidate(sid)
+    return added
 
 @app.websocket("/ws")
 async def voice_socket(ws: WebSocket) -> None:

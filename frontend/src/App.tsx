@@ -682,7 +682,7 @@ export default function App() {
             ) : day ? (
               <DayView day={day} onClose={dismissDay} />
             ) : (
-              !elicitation && showBoard && <Board docs={docs} uploading={uploading} receded={orbState !== "idle"} />
+              !elicitation && showBoard && <Board docs={docs} uploading={uploading} receded={orbState !== "idle"} sid={activeId} />
             )}
             <input
               ref={fileInputRef}
