@@ -134,6 +134,64 @@ async def prompt_suite(report: Report) -> None:
     report.check(ok, "prompt/answer-tool", "elicitation answer tool missing")
     print(f"  ({len(prompt)} chars, {len(declared)} tools)")
 
+def delegation_suite(report: Report) -> None:
+    from app.host import delegation
+
+    report.section("Hierarchical delegation at scale")
+    flat = manager.functions()
+    original = delegation.FLAT_LIMIT
+    try:
+        delegation.FLAT_LIMIT = len(flat) + 1
+        unchanged = [f["name"] for f in delegation.voice_functions()] == [f["name"] for f in flat]
+        report.line(unchanged, f"under the limit: all {len(flat)} tools declared, untouched")
+        report.check(unchanged, "delegation/flat", "small setups must not be collapsed")
+
+        delegation.FLAT_LIMIT = 8
+        collapsed = delegation.voice_functions()
+        smaller = len(collapsed) < len(flat)
+        report.line(smaller, f"over the limit: {len(flat)} tools -> {len(collapsed)} declared")
+        report.check(smaller, "delegation/collapse", "collapsing did not shrink the list")
+
+        reachable = set()
+        for f in collapsed:
+            server = delegation.server_for(f["name"])
+            if server:
+                reachable.update(t["name"] for t in manager.functions_by_server()[server])
+            else:
+                reachable.add(f["name"])
+        lost = {f["name"] for f in flat} - reachable
+        report.line(not lost, f"nothing became unreachable{'' if not lost else ': ' + ', '.join(lost)}")
+        report.check(not lost, "delegation/reachable", f"lost access to {lost}")
+
+        bad = delegation.server_for("use_nope") or delegation.server_for("calculate")
+        report.line(not bad, "unknown and non-delegate names resolve to nothing")
+        report.check(not bad, "delegation/resolve", f"resolved bogus name to {bad!r}")
+    finally:
+        delegation.FLAT_LIMIT = original
+
+def retrieval_suite(report: Report) -> None:
+    from app.host import agent_loop, tool_index
+
+    k = agent_loop.TOOLS_PER_STEP
+    total = len(manager.functions())
+    report.section(f"Tool retrieval puts the right tool in the top {k} of {total}")
+    if not tool_index.ready():
+        print("  skipped — index unavailable")
+        return
+
+    wanted = [(u, t) for u, t in cases.ROUTING if t]
+    misses = []
+    for utterance, expected in wanted:
+        chosen = tool_index.select(utterance, k) or []
+        ok = expected in chosen
+        if not ok:
+            misses.append((utterance, expected, chosen[:3]))
+        report.line(ok, f"{utterance[:44]:<46} {'' if ok else 'MISS -> ' + ', '.join(chosen[:3])}")
+
+    recall = (len(wanted) - len(misses)) / len(wanted)
+    print(f"  recall@{k}: {recall:.0%} over {len(wanted)} cases")
+    report.check(recall >= 0.9, "retrieval/recall", f"recall@{k} was {recall:.0%}, wanted >= 90%")
+
 async def _route(client, prompt: str, functions: list[dict], utterance: str) -> str | None:
     key = os.environ.get("GROQ_API_KEY")
     payload = {
@@ -208,6 +266,8 @@ async def main() -> int:
             contract_suite(report)
             await prompt_suite(report)
             await briefing_suite(report)
+            retrieval_suite(report)
+            delegation_suite(report)
             if args.routing:
                 await routing_suite(report)
         finally:
