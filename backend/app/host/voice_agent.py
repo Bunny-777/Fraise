@@ -10,7 +10,7 @@ import anyio
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
-from app.host import elicitation
+from app.host import delegation, elicitation
 from app.host.mcp_manager import manager
 from app.servers.memory import consolidate, store as memory_store
 
@@ -246,7 +246,7 @@ async def _build_settings(
                 "model": os.environ.get("DEEPGRAM_THINK_MODEL", "gpt-4o-mini"),
             },
             "prompt": prompt,
-            "functions": [*manager.functions(), ANSWER_FUNCTION],
+            "functions": [*delegation.voice_functions(), ANSWER_FUNCTION],
         },
         "speak": {"provider": {"type": "deepgram", "model": voice or os.environ.get("DEEPGRAM_VOICE", "aura-2-thalia-en")}},
     }
@@ -324,6 +324,8 @@ async def _invoke(fn: dict, session_id: str) -> str:
     """Run one tool to completion, turning any failure into speakable text."""
     try:
         args = json.loads(fn.get("arguments") or "{}")
+        if delegation.server_for(fn["name"]):
+            return await delegation.run(fn["name"], str(args.get("request") or ""), session_id)
         return await manager.call(fn["name"], args, session_id)
     except asyncio.CancelledError:
         raise
