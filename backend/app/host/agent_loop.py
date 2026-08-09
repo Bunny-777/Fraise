@@ -3,6 +3,7 @@ import json
 import logging
 from typing import Callable
 
+from app.host import tool_index
 from app.host.mcp_manager import manager
 from app.servers.research import llm
 
@@ -30,7 +31,9 @@ _SYSTEM = (
     "- If you genuinely cannot do the task, say so plainly in one sentence."
 )
 
-def _speakable_tools() -> list[dict]:
+TOOLS_PER_STEP = 8
+
+def _trim(functions: list[dict]) -> list[dict]:
     """Only the first line of each description — the full text costs tokens the
     per-minute budget can't spare once every tool is declared on every step."""
     return [
@@ -39,16 +42,25 @@ def _speakable_tools() -> list[dict]:
             "description": (f["description"] or "").split("\n")[0][:140],
             "parameters": f["parameters"],
         }
-        for f in manager.functions()
+        for f in functions
     ]
+
+def _tools_for(objective: str, allowed: list[dict] | None) -> list[dict]:
+    if allowed is not None:
+        return _trim(allowed)
+    chosen = tool_index.select(objective, TOOLS_PER_STEP)
+    if chosen is None:
+        return _trim(manager.functions())
+    return _trim(manager.functions_named(chosen))
 
 async def run(
     objective: str,
     session_id: str,
     on_step: Callable[[str], None] | None = None,
+    allowed: list[dict] | None = None,
 ) -> dict:
     """Let the model work one task to completion with whatever tools it wants."""
-    tools = _speakable_tools()
+    tools = _tools_for(objective, allowed)
     messages = [
         {"role": "system", "content": _SYSTEM},
         {"role": "user", "content": objective},

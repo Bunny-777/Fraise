@@ -14,7 +14,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from app.host import elicitation
+from app.host import elicitation, tool_index
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +84,11 @@ class MCPManager:
             except Exception:
                 logger.exception("skipping MCP server %r — failed to connect", name)
         self._build_routes()
+        tool_index.build(self.index_rows())
         logger.info(
-            "MCP host ready: %d server(s), %d tool(s)",
+            "MCP host ready: %d server(s), %d tool(s), index %s",
             len(self._servers), len(self._route),
+            "ready" if tool_index.ready() else "unavailable",
         )
 
     def _register(self, name: str, session: ClientSession, tools: list, instructions: str) -> None:
@@ -207,6 +209,26 @@ class MCPManager:
                 for public, (sname, tname) in self._route.items()
             ]
         return self._functions_cache
+
+    def server_of(self, public_name: str) -> str:
+        route = self._route.get(public_name)
+        return route[0] if route else ""
+
+    def index_rows(self) -> list[dict]:
+        rows = []
+        for f in self.functions():
+            server = self.server_of(f["name"])
+            rows.append({
+                "name": f["name"],
+                "server": server,
+                "description": f["description"],
+                "contract": (self._servers.get(server) or {}).get("instructions", ""),
+            })
+        return rows
+
+    def functions_named(self, names: list[str]) -> list[dict]:
+        wanted = set(names)
+        return [f for f in self.functions() if f["name"] in wanted]
 
     def instructions_by_server(self) -> dict[str, str]:
         return {
