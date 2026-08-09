@@ -75,13 +75,12 @@ A private MCP server over your own calendar. Tokens and event data are stored on
 
 ---
 
-## Phase 5 — Tool scale & routing ⏳
+## Phase 5 — Tool scale & routing ✅
 
 A flat function list is fine at ten tools; at a hundred it overflows the model's context and dilutes selection accuracy. This phase keeps routing sharp as the server count grows — without touching the "a capability is one config entry" invariant.
 
-- [ ] **Hierarchical tool selection** — two-stage routing: pick the domain/server first, then the tool, so the LLM never faces the whole flat namespace at once.
-- [ ] **Semantic tool retrieval** — embed tool descriptions at connect time and surface only the top-_k_ relevant tools for a given utterance, instead of sending every declaration every turn.
-- [ ] **Lazy schema exposure** — hand the model a server's full tool schemas only once its domain is in play, keeping the base prompt small.
+- [x] **Semantic tool retrieval** (`host/tool_index.py`) — every tool is embedded once at connect with the same local ONNX encoder the documents use, so selection is a dot product with no API and no new dependency. The agent loop sends the top 8 instead of all of them. Measured on the routing cases: **recall@6 is 100%, recall@8 is 100%**, and it degrades to the full list whenever the index is unavailable. Folding each skill's contract into the tool text was tried and *reverted* — it made every tool in a skill read alike and dropped recall@6 to 94%.
+- [x] **Hierarchical tool selection** + **lazy schema exposure** (`host/delegation.py`) — Deepgram fixes `think.functions` when the session opens and offers no way to swap them per utterance (`UpdatePrompt` only appends to the prompt), so per-turn retrieval is impossible on the voice path. Hierarchy is: past `VOICE_TOOL_LIMIT` tools, single-tool skills stay declared directly and larger ones collapse behind one `use_<skill>(request)` delegate each; calling a delegate runs a scoped second hop where that skill's full schemas are back in play. At 16 tools with a limit of 8 that is 16 declared → 7, with an eval asserting no tool becomes unreachable. Below the limit nothing is collapsed, so today's setup is untouched.
 - [x] **Routing eval harness** (`backend/evals/`) — `python -m evals.run` checks, with no API key and no cost, that every connected skill declares a contract, that each one survives into the composed prompt, and that what tools hand back is speakable (no markdown, no bullets, no spoken URLs) — the class of bug that had Fraise reading a résumé aloud as `**bold**`. `--routing` adds live `utterance → expected tool` cases so adding a server can't silently regress selection.
 
 ---
