@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: fraise-backend
+    runtime: python
+    plan: standard          # 2 GB RAM — the Whisper + ONNX models don't fit in starter's 512 MB
+    region: oregon
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --ws websockets
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: fraise-data
+      mountPath: /var/data   # SQLite + HF model cache survive restarts
+      sizeGB: 10
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: HF_HOME
+        value: /var/data/hf
+      - key: FRAISE_DATA_DIR
+        value: /var/data/fraise
+      - key: STT_MODEL
+        value: base
+      - key: STT_LIVE_MODEL
+        value: tiny
+      - key: CORS_ORIGINS
+        value: https://fraise.vercel.app
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false

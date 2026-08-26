@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +10,8 @@ import sqlite_vec
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).resolve().parents[1] / "data" / "fraise.db"
+_DATA_DIR = Path(os.getenv("FRAISE_DATA_DIR") or Path(__file__).resolve().parents[1] / "data")
+DB_PATH = _DATA_DIR / "fraise.db"
 
 _MIGRATIONS = [
     """
