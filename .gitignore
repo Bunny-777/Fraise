@@ -11,7 +11,7 @@ __pycache__/
 *.pyc
 .claude
 CLAUDE.md
-deploy
+# (deploy/ is tracked - provisioning scripts live there)
 
 # Local data stores (memory, RAG)
 backend/app/data/

@@ -1,0 +1,27 @@
+[Unit]
+Description=Fraise backend (FastAPI + MCP voice host)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Fraise/backend
+EnvironmentFile=/home/ubuntu/Fraise/.env
+# Models cache here so they survive restarts instead of re-downloading.
+Environment=HF_HOME=/home/ubuntu/Fraise/backend/.cache
+Environment=FRAISE_DATA_DIR=/home/ubuntu/Fraise/backend/app/data
+# t3.micro has 2 vCPU; leaving these at 1 keeps transcription from starving the event loop.
+Environment=STT_CPU_THREADS=1
+Environment=STT_LIVE_CPU_THREADS=1
+Environment=OMP_NUM_THREADS=1
+ExecStart=/home/ubuntu/Fraise/backend/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8000 --ws websockets --timeout-keep-alive 75
+Restart=always
+RestartSec=5
+# Warm-up downloads models on first boot; don't let systemd give up early.
+TimeoutStartSec=600
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

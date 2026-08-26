@@ -1,0 +1,15 @@
+# Replace <IP-WITH-DASHES> with the Elastic IP, dashes not dots.
+# e.g. 13.234.56.78  ->  13-234-56-78.sslip.io
+<IP-WITH-DASHES>.sslip.io {
+	encode zstd gzip
+
+	# Voice and dictation are long-lived WebSockets; Caddy proxies them
+	# natively, but the timeouts have to outlast a quiet call.
+	reverse_proxy 127.0.0.1:8000 {
+		flush_interval -1
+		transport http {
+			read_timeout 24h
+			write_timeout 24h
+		}
+	}
+}
