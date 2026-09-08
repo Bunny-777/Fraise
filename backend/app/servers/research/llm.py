@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
-MODEL = os.environ.get("RESEARCH_MODEL", "llama-3.1-8b-instant")
-SYNTH_MODEL = os.environ.get("RESEARCH_SYNTH_MODEL", "llama-3.3-70b-versatile")
+MODEL = os.environ.get("RESEARCH_MODEL", "openai/gpt-oss-20b")
+SYNTH_MODEL = os.environ.get("RESEARCH_SYNTH_MODEL", "openai/gpt-oss-120b")
 
 _TIMEOUT = httpx.Timeout(45.0, connect=10.0)
 _RETRIES = 5

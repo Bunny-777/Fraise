@@ -20,7 +20,7 @@ from app.servers.calculator import mcp as calculator
 from evals import cases, speakable
 
 GROQ_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-ROUTER_MODEL = os.environ.get("EVAL_ROUTER_MODEL", "llama-3.3-70b-versatile")
+ROUTER_MODEL = os.environ.get("EVAL_ROUTER_MODEL", "openai/gpt-oss-120b")
 
 class Report:
     def __init__(self) -> None:
