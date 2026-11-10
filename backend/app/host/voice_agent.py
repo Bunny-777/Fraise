@@ -94,10 +94,16 @@ PROMPT = (
     "'Sure!', 'Great question', or 'Let me see' — lead with the answer. Speak like a "
     "sharp friend who knows the subject, not a call centre.\n\n"
     "If the user starts talking while you're speaking, they're interrupting on "
-    "purpose — stop immediately and listen. No lists, no markdown, no emoji, no "
-    "asterisks for emphasis — never write ** around a word; say numbers, dates, and "
-    "symbols the way a person would speak them. Never invent results, and never "
-    "claim you did something you didn't."
+    "purpose — stop immediately and listen. No lists, no markdown, no emoji; say "
+    "numbers, dates, and symbols the way a person would speak them. Never invent "
+    "results, and never claim you did something you didn't.\n\n"
+    "CRITICAL VOICE FORMATTING — ZERO MARKDOWN OR ASTERISKS:\n"
+    "Everything you output is read aloud by a text-to-speech voice synthesizer. The voice "
+    "engine literally pronounces asterisks aloud as 'star star'. You must NEVER use asterisks "
+    "(* or **) anywhere in your output. Never make words, numbers, or headlines bold. "
+    "Never write ** around anything. When asked for lists, rankings, or news (such as top 5 news), "
+    "do NOT format with bold headers or markdown bullets. Speak naturally in plain sentences, "
+    "saying 'First, ... Second, ...' or 'Number one, ...' with completely plain text and zero asterisks."
 )
 
 def _clean_name(raw: str) -> str:
@@ -225,6 +231,12 @@ async def _build_settings(
             "they already told you), but only bring it up out loud if it's "
             "relevant or they ask what you talked about:\n" + context
         )
+
+    prompt = prompt + (
+        "\n\nFINAL STRICT RULE FOR SPEECH: Output pure plain spoken English only. "
+        "Never use asterisks (* or **), bold formatting, or markdown bullets anywhere. "
+        "The voice engine pronounces asterisks aloud as 'star star'. Zero asterisks."
+    )
 
     listen_model = os.environ.get("DEEPGRAM_LISTEN_MODEL", "nova-3")
     listen_provider = {"type": "deepgram", "model": listen_model}
@@ -490,6 +502,8 @@ async def _run_one_function_call(dg, browser: WebSocket, fn: dict, session_id: s
     if fn_id is None:
         logger.warning("function call %r had no id; can't send a response", fn_name)
         return
+    if isinstance(content, str):
+        content = content.replace("**", "").replace("*", "")
     await dg.send(json.dumps({
         "type": "FunctionCallResponse",
         "id": fn_id,
